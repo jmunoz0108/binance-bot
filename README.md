@@ -1,3 +1,13 @@
-# Binance Bot
+# Binance Spot + Futures Bot PRO Final
 
-Binance Spot + Futures bot with FastAPI webhook server, paper mode, Railway deployment support, and TradingView integration.
+Includes:
+- paper mode
+- Binance Spot market execution
+- Binance Futures market execution
+- TradingView webhook endpoint
+- position manager with break-even and trailing logic
+- reversal-confirmed exits
+- futures websocket fill sync
+- Railway-ready deployment files
+
+Use paper mode first.
