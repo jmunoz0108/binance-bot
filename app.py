@@ -88,6 +88,11 @@ AUTO_RISK_BASE_MULTIPLIER = float(os.getenv("AUTO_RISK_BASE_MULTIPLIER", "1.0"))
 AUTO_RISK_HIGH_QUALITY_MULTIPLIER = float(os.getenv("AUTO_RISK_HIGH_QUALITY_MULTIPLIER", "1.25"))
 AUTO_RISK_LOW_QUALITY_MULTIPLIER = float(os.getenv("AUTO_RISK_LOW_QUALITY_MULTIPLIER", "0.60"))
 
+ALERTS_ENABLED = os.getenv("ALERTS_ENABLED", "false").lower() == "true"
+DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+
 SAFETY_STATE: Dict[str, Any] = {
     "emergency_stop": False,
     "reason": None,
@@ -833,6 +838,14 @@ def execute(payload: SignalPayload):
     approved = bool(result.get("submitted"))
     response = {"approved": approved, "exchange": exchange, "structure": structure, "orderbook": orderbook, "setup_quality": setup_quality, "order_plan": plan, "result": result, "ts": now_iso()}
     journal(payload, approved, result.get("reason", ""), response)
+
+    if approved:
+        notify_user(
+            "Trade opened",
+            f"{payload.signal.upper()} {payload.ticker} on {exchange}",
+            {"position_id": result.get("position_id"), "exchange": exchange, "plan": plan}
+        )
+
     return response
 
 
@@ -949,6 +962,11 @@ def manage_position(position, current_price: float, signal_evidence: ManagePosit
             if close_result["status_code"] < 400:
                 updates["status"] = "closed"
         actions.append({"type": "close_position", "reason": reversal["reasons"], "close_result": close_result})
+        notify_user(
+            "Position closed",
+            f"{position['signal'].upper()} {position['ticker']} closed by manager",
+            {"position_id": position["id"], "reason": reversal["reasons"], "close_result": close_result}
+        )
 
     append_position_metadata(position["id"], {"last_manage_check": {"at": now_iso(), "current_price": current_price, "current_r": current_r, "reversal_score": reversal["reversal_score"], "reversal_reasons": reversal["reasons"], "actions": actions}})
     update_position(position["id"], updates)
@@ -1635,6 +1653,7 @@ def safety_status():
         "mtf_confirm_enabled": MTF_CONFIRM_ENABLED,
         "mtf_interval": MTF_INTERVAL,
         "auto_risk_enabled": AUTO_RISK_ENABLED,
+        "alerts_enabled": ALERTS_ENABLED,
     }
 
 
@@ -1737,6 +1756,134 @@ def estimate_position_pnl(position: Dict[str, Any]):
     return {"realized": pnl, "close_price": close_avg, "close_qty": close_qty}
 
 
+
+def notify_user(title: str, body: str, data: Optional[Dict[str, Any]] = None):
+    if not ALERTS_ENABLED:
+        return {"sent": False, "reason": "alerts disabled"}
+
+    results = {}
+
+    try:
+        if DISCORD_WEBHOOK_URL:
+            content = f"**{title}**\n{body}"
+            if data:
+                content += "\n```json\n" + json.dumps(data, default=str)[:1500] + "\n```"
+            r = httpx.post(DISCORD_WEBHOOK_URL, json={"content": content}, timeout=10.0)
+            results["discord"] = {"status_code": r.status_code, "ok": r.status_code < 300}
+    except Exception as exc:
+        results["discord"] = {"ok": False, "error": str(exc)}
+
+    try:
+        if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
+            text = f"{title}\n{body}"
+            if data:
+                text += "\n" + json.dumps(data, default=str)[:2500]
+            url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+            r = httpx.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": text}, timeout=10.0)
+            results["telegram"] = {"status_code": r.status_code, "ok": r.status_code < 300}
+    except Exception as exc:
+        results["telegram"] = {"ok": False, "error": str(exc)}
+
+    if not results:
+        return {"sent": False, "reason": "no alert destination configured"}
+
+    return {"sent": True, "results": results}
+
+
+def _parse_dt_hour(created_at: str):
+    try:
+        return datetime.fromisoformat(created_at.replace("Z", "+00:00")).hour
+    except Exception:
+        return None
+
+
+def analytics_trade_rows():
+    positions = get_all_positions(1000) if "get_all_positions" in globals() else []
+    rows = []
+    for p in positions:
+        pnl_info = estimate_position_pnl(p) if "estimate_position_pnl" in globals() else {"realized": None}
+        meta = safe_json_loads(p.get("metadata_json")) if "safe_json_loads" in globals() else {}
+        rows.append({
+            "id": p.get("id"),
+            "created_at": p.get("created_at"),
+            "hour_utc": _parse_dt_hour(p.get("created_at") or ""),
+            "ticker": p.get("ticker"),
+            "signal": p.get("signal"),
+            "exchange": p.get("exchange"),
+            "status": p.get("status"),
+            "entry_price": p.get("entry_price"),
+            "stop_price": p.get("stop_price"),
+            "qty": p.get("qty"),
+            "risk_usd": p.get("risk_usd"),
+            "pnl": pnl_info.get("realized"),
+            "close_price": pnl_info.get("close_price"),
+            "strategy": meta.get("strategy"),
+            "risk_per_unit": meta.get("risk_per_unit"),
+        })
+    return rows
+
+
+def analytics_summary_data():
+    rows = analytics_trade_rows()
+    closed = [r for r in rows if r.get("status") == "closed" and r.get("pnl") is not None]
+    open_rows = [r for r in rows if r.get("status") == "open"]
+
+    wins = len([r for r in closed if r["pnl"] > 0])
+    losses = len([r for r in closed if r["pnl"] < 0])
+    breakeven = len([r for r in closed if r["pnl"] == 0])
+    total = wins + losses + breakeven
+    realized = sum(float(r["pnl"]) for r in closed)
+    gross_win = sum(float(r["pnl"]) for r in closed if r["pnl"] > 0)
+    gross_loss = abs(sum(float(r["pnl"]) for r in closed if r["pnl"] < 0))
+
+    equity = []
+    running = 0.0
+    for r in sorted(closed, key=lambda x: x.get("created_at") or ""):
+        running += float(r["pnl"])
+        equity.append({"time": r.get("created_at"), "equity": running, "pnl": r["pnl"], "ticker": r["ticker"]})
+
+    by_symbol = {}
+    by_hour = {}
+    for r in closed:
+        s = r.get("ticker") or "UNKNOWN"
+        by_symbol.setdefault(s, {"trades": 0, "wins": 0, "losses": 0, "pnl": 0.0})
+        by_symbol[s]["trades"] += 1
+        by_symbol[s]["pnl"] += float(r["pnl"])
+        if r["pnl"] > 0:
+            by_symbol[s]["wins"] += 1
+        elif r["pnl"] < 0:
+            by_symbol[s]["losses"] += 1
+
+        h = r.get("hour_utc")
+        if h is not None:
+            by_hour.setdefault(str(h), {"trades": 0, "wins": 0, "losses": 0, "pnl": 0.0})
+            by_hour[str(h)]["trades"] += 1
+            by_hour[str(h)]["pnl"] += float(r["pnl"])
+            if r["pnl"] > 0:
+                by_hour[str(h)]["wins"] += 1
+            elif r["pnl"] < 0:
+                by_hour[str(h)]["losses"] += 1
+
+    return {
+        "summary": {
+            "open_positions": len(open_rows),
+            "closed_counted": total,
+            "wins": wins,
+            "losses": losses,
+            "breakeven": breakeven,
+            "win_rate": (wins / total * 100.0) if total else 0.0,
+            "realized_pnl": realized,
+            "avg_win": gross_win / wins if wins else 0.0,
+            "avg_loss": -(gross_loss / losses) if losses else 0.0,
+            "profit_factor": (gross_win / gross_loss) if gross_loss else None,
+        },
+        "equity_curve": equity,
+        "by_symbol": by_symbol,
+        "by_hour_utc": by_hour,
+        "recent_trades": rows[:100],
+    }
+
+
 def dashboard_stats_data():
     positions = get_all_positions(500)
     open_positions = [p for p in positions if p.get("status") == "open"]
@@ -1820,6 +1967,28 @@ def dashboard_stats_data():
     }
 
 
+
+
+
+@app.get("/analytics/summary")
+def analytics_summary():
+    return analytics_summary_data()
+
+
+@app.get("/analytics/equity-curve")
+def analytics_equity_curve():
+    return {"equity_curve": analytics_summary_data()["equity_curve"]}
+
+
+@app.get("/analytics/session-performance")
+def analytics_session_performance():
+    data = analytics_summary_data()
+    return {"by_hour_utc": data["by_hour_utc"]}
+
+
+@app.post("/alerts/test")
+def alerts_test():
+    return notify_user("Bot alert test", "Your bot alerts are working.", {"time": now_iso()})
 
 
 @app.get("/dashboard", response_class=HTMLResponse)
@@ -2030,7 +2199,7 @@ def dashboard():
         </div>
         <div>
             <div class="sectionTitle">System Detail</div>
-            <div class="card"><pre id="systemBox">Loading...</pre></div>
+            <div class="card"><pre id="systemBox">Loading...</pre></div><div class="sectionTitle">Analytics Detail</div><div class="card"><pre id="analyticsBox">Loading...</pre></div>
         </div>
     </div>
 </div>
@@ -2181,8 +2350,20 @@ async function action(url, method) {
         document.getElementById("controlResult").textContent = e.message;
     }
 }
+
+async function loadAnalytics() {
+    try {
+        const d = await getJson("/analytics/summary");
+        const el = document.getElementById("analyticsBox");
+        if (el) el.textContent = JSON.stringify(d, null, 2);
+    } catch(e) {
+        const el = document.getElementById("analyticsBox");
+        if (el) el.textContent = "Analytics unavailable: " + e.message;
+    }
+}
+
 async function refreshAll() {
-    await Promise.allSettled([loadRoot(), loadConfig(), loadSafety(), loadScanner(), loadPositions(), loadStats(), loadSystem()]);
+    await Promise.allSettled([loadRoot(), loadConfig(), loadSafety(), loadScanner(), loadPositions(), loadStats(), loadSystem(), loadAnalytics()]);
 }
 refreshAll();
 setInterval(refreshAll, 10000);
@@ -2199,7 +2380,7 @@ def dashboard_stats():
 
 @app.get("/")
 def root():
-    return {"status": "ok", "service": "binance-spot-futures-bot-pro-final-dashboard-v2", "time": now_iso()}
+    return {"status": "ok", "service": "binance-spot-futures-bot-pro-final-analytics-alerts-v1", "time": now_iso()}
 
 
 @app.get("/config")

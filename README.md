@@ -1,15 +1,19 @@
-# Binance Bot Dashboard V2
+# Binance Bot Analytics + Alerts V1
 
-Adds better dashboard:
-- PnL summary
-- win/loss count
-- win rate bar
-- scanner watchlist / interested setups
-- closed trade table
-- open trade table
-- safety controls
-- scanner controls
-- futures websocket controls
+Adds:
+- analytics summary endpoint
+- equity curve data
+- session/hour performance
+- symbol performance
+- Discord/Telegram alert support
+- alert test endpoint
+- dashboard analytics detail panel
 
-Open:
-https://YOUR-DOMAIN/dashboard
+Endpoints:
+- GET /analytics/summary
+- GET /analytics/equity-curve
+- GET /analytics/session-performance
+- POST /alerts/test
+
+Service:
+binance-spot-futures-bot-pro-final-analytics-alerts-v1
