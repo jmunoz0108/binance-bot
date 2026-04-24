@@ -875,3 +875,5 @@ def futures_ws_status():
 def futures_sync_open_positions():
     positions = get_all_open_futures_positions()
     return {"count": len(positions), "results": [sync_single_futures_position_from_exchange(p) for p in positions]}
+  
+  
