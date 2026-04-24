@@ -627,22 +627,4 @@ def futures_sync_open_positions():
     if len(highs) < 3 or len(lows) < 3:
         return {"allow": False, "reason": "not enough structure"}
 
-    # simple structure logic
-    hh = highs[-1] > highs[-2]
-    hl = lows[-1] > lows[-2]
-    lh = highs[-1] < highs[-2]
-    ll = lows[-1] < lows[-2]
-
-    trend = None
-
-    if hh and hl:
-        trend = "bullish"
-    elif ll and lh:
-        trend = "bearish"
-    else:
-        trend = "sideways"
-
-    if trend == "sideways":
-        return {"allow": False, "reason": "sideways market"}
-
-    return {"allow": True, "trend": trend}
+  
