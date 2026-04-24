@@ -64,6 +64,21 @@ CONTINUATION_PULLBACK_MIN_PCT = float(os.getenv("CONTINUATION_PULLBACK_MIN_PCT",
 CONTINUATION_PULLBACK_MAX_PCT = float(os.getenv("CONTINUATION_PULLBACK_MAX_PCT", "2.50"))
 CONTINUATION_LOOKBACK = int(os.getenv("CONTINUATION_LOOKBACK", "8"))
 
+
+AUTO_DISCOVER_SYMBOLS = os.getenv("AUTO_DISCOVER_SYMBOLS", "false").lower() == "true"
+AUTO_DISCOVER_TOP_N = int(os.getenv("AUTO_DISCOVER_TOP_N", "30"))
+AUTO_DISCOVER_MIN_QUOTE_VOLUME = float(os.getenv("AUTO_DISCOVER_MIN_QUOTE_VOLUME", "50000000"))
+AUTO_DISCOVER_REFRESH_SECONDS = int(os.getenv("AUTO_DISCOVER_REFRESH_SECONDS", "1800"))
+AUTO_DISCOVER_EXCLUDE = [s.strip().upper() for s in os.getenv("AUTO_DISCOVER_EXCLUDE", "").split(",") if s.strip()]
+AUTO_DISCOVER_INCLUDE_NEW = os.getenv("AUTO_DISCOVER_INCLUDE_NEW", "true").lower() == "true"
+
+DISCOVERY_STATE: Dict[str, Any] = {
+    "last_refresh": None,
+    "symbols": [],
+    "last_error": None,
+    "raw_count": 0,
+}
+
 SCANNER_STATE: Dict[str, Any] = {
     "task": None,
     "running": False,
@@ -1067,6 +1082,103 @@ async def _futures_ws_loop():
 
 
 
+
+def get_auto_discovered_symbols(force: bool = False):
+    """
+    Auto-discover Binance USDT perpetual futures symbols.
+    Filters:
+    - USDT contracts only
+    - TRADING status
+    - PERPETUAL contracts
+    - minimum quote volume
+    - top N by quote volume
+    - excludes symbols in AUTO_DISCOVER_EXCLUDE
+    """
+    now_ts = int(datetime.now(timezone.utc).timestamp())
+
+    if (
+        not force
+        and DISCOVERY_STATE["symbols"]
+        and DISCOVERY_STATE["last_refresh"]
+        and now_ts - int(DISCOVERY_STATE["last_refresh"]) < AUTO_DISCOVER_REFRESH_SECONDS
+    ):
+        return DISCOVERY_STATE["symbols"]
+
+    try:
+        info = public_get(BINANCE_FUTURES_BASE_URL, "/fapi/v1/exchangeInfo", {})
+        if info["status_code"] >= 400:
+            raise RuntimeError(info["text"])
+
+        tickers = public_get(BINANCE_FUTURES_BASE_URL, "/fapi/v1/ticker/24hr", {})
+        if tickers["status_code"] >= 400:
+            raise RuntimeError(tickers["text"])
+
+        valid = set()
+        for s in info["json"].get("symbols", []):
+            symbol = s.get("symbol", "")
+            if s.get("status") != "TRADING":
+                continue
+            if s.get("contractType") != "PERPETUAL":
+                continue
+            if s.get("quoteAsset") != "USDT":
+                continue
+            if symbol in AUTO_DISCOVER_EXCLUDE:
+                continue
+            valid.add(symbol)
+
+        ranked = []
+        for t in tickers["json"]:
+            symbol = t.get("symbol", "")
+            if symbol not in valid:
+                continue
+            try:
+                quote_volume = float(t.get("quoteVolume", 0) or 0)
+                price_change_pct = abs(float(t.get("priceChangePercent", 0) or 0))
+                last_price = float(t.get("lastPrice", 0) or 0)
+            except Exception:
+                continue
+
+            if quote_volume < AUTO_DISCOVER_MIN_QUOTE_VOLUME:
+                continue
+
+            ranked.append({
+                "symbol": symbol,
+                "quote_volume": quote_volume,
+                "price_change_pct": price_change_pct,
+                "last_price": last_price,
+            })
+
+        ranked.sort(key=lambda x: x["quote_volume"], reverse=True)
+        selected = [x["symbol"] for x in ranked[:AUTO_DISCOVER_TOP_N]]
+
+        # Optionally append configured manual symbols too, useful for new listings or watchlist.
+        if AUTO_DISCOVER_INCLUDE_NEW:
+            for s in SCANNER_SYMBOLS:
+                if s not in selected and s not in AUTO_DISCOVER_EXCLUDE:
+                    selected.append(s)
+
+        DISCOVERY_STATE["symbols"] = selected
+        DISCOVERY_STATE["last_refresh"] = now_ts
+        DISCOVERY_STATE["last_error"] = None
+        DISCOVERY_STATE["raw_count"] = len(ranked)
+        DISCOVERY_STATE["ranked_preview"] = ranked[:10]
+        return selected
+
+    except Exception as exc:
+        DISCOVERY_STATE["last_error"] = str(exc)
+        # fallback to manual symbols if discovery fails
+        if DISCOVERY_STATE["symbols"]:
+            return DISCOVERY_STATE["symbols"]
+        return SCANNER_SYMBOLS
+
+
+def get_scanner_symbols():
+    if AUTO_DISCOVER_SYMBOLS:
+        return get_auto_discovered_symbols()
+    return SCANNER_SYMBOLS
+
+
+
 def futures_klines(symbol: str, interval: str = "5m", limit: int = 120):
     r = public_get(BINANCE_FUTURES_BASE_URL, "/fapi/v1/klines", {"symbol": symbol.upper(), "interval": interval, "limit": limit})
     if r["status_code"] >= 400:
@@ -1232,7 +1344,7 @@ def run_scanner_once():
     results = []
     now_ts = int(datetime.now(timezone.utc).timestamp())
 
-    for symbol in SCANNER_SYMBOLS:
+    for symbol in get_scanner_symbols():
         try:
             analysis = analyze_symbol_for_setup(symbol)
             results.append(analysis)
@@ -1290,6 +1402,20 @@ async def _scanner_loop():
 
 
 
+
+
+@app.post("/scanner/discover-refresh")
+def scanner_discover_refresh():
+    symbols = get_auto_discovered_symbols(force=True)
+    return {
+        "ok": True,
+        "auto_discovery": AUTO_DISCOVER_SYMBOLS,
+        "symbols": symbols,
+        "count": len(symbols),
+        "discovery": DISCOVERY_STATE,
+    }
+
+
 @app.post("/scanner/start")
 async def scanner_start():
     if SCANNER_STATE["running"]:
@@ -1297,7 +1423,7 @@ async def scanner_start():
     SCANNER_STATE["running"] = True
     SCANNER_STATE["last_error"] = None
     SCANNER_STATE["task"] = asyncio.create_task(_scanner_loop())
-    return {"ok": True, "reason": "scanner started", "symbols": SCANNER_SYMBOLS, "exchange": SCANNER_EXCHANGE}
+    return {"ok": True, "reason": "scanner started", "symbols": get_scanner_symbols(), "exchange": SCANNER_EXCHANGE, "auto_discovery": AUTO_DISCOVER_SYMBOLS}
 
 
 @app.post("/scanner/stop")
@@ -1320,7 +1446,10 @@ def scanner_scan_once():
 def scanner_status():
     return {
         "running": SCANNER_STATE["running"],
-        "symbols": SCANNER_SYMBOLS,
+        "symbols": get_scanner_symbols(),
+        "manual_symbols": SCANNER_SYMBOLS,
+        "auto_discovery": AUTO_DISCOVER_SYMBOLS,
+        "discovery": DISCOVERY_STATE,
         "exchange": SCANNER_EXCHANGE,
         "interval": SCANNER_INTERVAL,
         "sleep_seconds": SCANNER_SLEEP_SECONDS,
@@ -1494,7 +1623,7 @@ def dashboard():
             <button onclick="startWs()">Start Futures WS</button>
             <button class="gray" onclick="stopWs()">Stop Futures WS</button>
             <button onclick="syncFutures()">Sync Futures</button>
-            <button onclick="startScanner()">Start Scanner</button><button class="gray" onclick="stopScanner()">Stop Scanner</button><button onclick="scanOnce()">Scan Once</button><button class="gray" onclick="refreshAll()">Refresh</button>
+            <button onclick="startScanner()">Start Scanner</button><button class="gray" onclick="stopScanner()">Stop Scanner</button><button onclick="scanOnce()">Scan Once</button><button onclick="refreshDiscovery()">Refresh Symbols</button><button class="gray" onclick="refreshAll()">Refresh</button>
             <a href="/docs" target="_blank"><button class="gray">Open API Docs</button></a>
         </div>
         <div id="controlResult" class="small" style="margin-top:10px;"></div>
@@ -1667,6 +1796,17 @@ async function loadScanner() {
     }
 }
 
+
+async function refreshDiscovery() {
+    try {
+        const data = await getJson("/scanner/discover-refresh", {method:"POST"});
+        document.getElementById("controlResult").textContent = JSON.stringify({ok:data.ok,count:data.count});
+        setTimeout(refreshAll, 1000);
+    } catch(e) {
+        document.getElementById("controlResult").textContent = e.message;
+    }
+}
+
 async function startScanner() {
     try {
         const data = await getJson("/scanner/start", {method:"POST"});
@@ -1712,7 +1852,7 @@ setInterval(refreshAll, 10000);
 
 @app.get("/")
 def root():
-    return {"status": "ok", "service": "binance-spot-futures-bot-pro-final-continuation-v1", "time": now_iso()}
+    return {"status": "ok", "service": "binance-spot-futures-bot-pro-final-auto-discovery", "time": now_iso()}
 
 
 @app.get("/config")
@@ -1731,6 +1871,9 @@ def config():
         "scanner_exchange": SCANNER_EXCHANGE,
         "scanner_symbols": SCANNER_SYMBOLS,
         "scanner_interval": SCANNER_INTERVAL,
+        "auto_discover_symbols": AUTO_DISCOVER_SYMBOLS,
+        "auto_discover_top_n": AUTO_DISCOVER_TOP_N,
+        "auto_discover_min_quote_volume": AUTO_DISCOVER_MIN_QUOTE_VOLUME,
         "continuation_enabled": CONTINUATION_ENABLED,
         "continuation_pullback_min_pct": CONTINUATION_PULLBACK_MIN_PCT,
         "continuation_pullback_max_pct": CONTINUATION_PULLBACK_MAX_PCT,

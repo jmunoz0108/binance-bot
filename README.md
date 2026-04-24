@@ -1,12 +1,17 @@
-# Binance Bot PRO Continuation V1
+# Binance Bot PRO Auto Discovery
 
-Adds:
-- stop logic fix using actual fill price for futures
-- trend continuation mode
-- scanner continuation detection
-- TradingView indicator with continuation signals
-- TP1/TP2/TP3 visual lines
-- possible exit visual markers
+Adds auto symbol discovery:
+- pulls all Binance USDT perpetual futures symbols
+- filters by TRADING + PERPETUAL + USDT
+- ranks by 24h quote volume
+- scans top N symbols automatically
+- includes manual watchlist too if enabled
+- refreshes symbols every AUTO_DISCOVER_REFRESH_SECONDS
+- dashboard button: Refresh Symbols
 
-Service after deploy:
-binance-spot-futures-bot-pro-final-continuation-v1
+Recommended safe variables:
+SCANNER_EXCHANGE=paper
+AUTO_DISCOVER_SYMBOLS=true
+AUTO_DISCOVER_TOP_N=20
+AUTO_DISCOVER_MIN_QUOTE_VOLUME=50000000
+ENABLE_EXECUTION=false
