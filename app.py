@@ -1,5 +1,6 @@
 
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from typing import Optional, Literal, Dict, Any, List
 from pathlib import Path
@@ -945,9 +946,344 @@ async def _futures_ws_loop():
             WS_STATE["listen_key"] = None
 
 
+
+
+@app.get("/dashboard", response_class=HTMLResponse)
+def dashboard():
+    return """
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Binance Bot Dashboard</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        body {
+            margin: 0;
+            font-family: Arial, sans-serif;
+            background: #0b0f19;
+            color: #e5e7eb;
+        }
+        header {
+            padding: 22px;
+            background: #111827;
+            border-bottom: 1px solid #263244;
+        }
+        h1 {
+            margin: 0;
+            font-size: 24px;
+        }
+        .subtitle {
+            color: #9ca3af;
+            margin-top: 6px;
+        }
+        .wrap {
+            padding: 20px;
+            max-width: 1400px;
+            margin: auto;
+        }
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+            gap: 16px;
+            margin-bottom: 20px;
+        }
+        .card {
+            background: #111827;
+            border: 1px solid #263244;
+            border-radius: 14px;
+            padding: 16px;
+            box-shadow: 0 8px 22px rgba(0,0,0,0.25);
+        }
+        .card h3 {
+            margin: 0 0 8px 0;
+            font-size: 14px;
+            color: #9ca3af;
+            font-weight: normal;
+        }
+        .value {
+            font-size: 24px;
+            font-weight: bold;
+        }
+        .green { color: #22c55e; }
+        .red { color: #ef4444; }
+        .yellow { color: #eab308; }
+        .blue { color: #38bdf8; }
+        button {
+            background: #2563eb;
+            color: white;
+            border: 0;
+            padding: 10px 13px;
+            border-radius: 10px;
+            cursor: pointer;
+            margin: 3px;
+            font-weight: 600;
+        }
+        button:hover { background: #1d4ed8; }
+        button.danger { background: #dc2626; }
+        button.danger:hover { background: #b91c1c; }
+        button.gray { background: #374151; }
+        button.gray:hover { background: #4b5563; }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 10px;
+            overflow: hidden;
+            border-radius: 12px;
+        }
+        th, td {
+            text-align: left;
+            padding: 11px;
+            border-bottom: 1px solid #263244;
+            font-size: 13px;
+        }
+        th {
+            color: #9ca3af;
+            background: #0f172a;
+        }
+        tr:hover { background: #172033; }
+        .pill {
+            display: inline-block;
+            padding: 4px 9px;
+            border-radius: 999px;
+            font-size: 12px;
+            font-weight: bold;
+        }
+        .pill.open { background: rgba(34,197,94,0.16); color: #22c55e; }
+        .pill.closed { background: rgba(156,163,175,0.16); color: #9ca3af; }
+        .pill.long { background: rgba(34,197,94,0.16); color: #22c55e; }
+        .pill.short { background: rgba(239,68,68,0.16); color: #ef4444; }
+        pre {
+            background: #020617;
+            border: 1px solid #263244;
+            padding: 12px;
+            border-radius: 12px;
+            overflow: auto;
+            max-height: 340px;
+            font-size: 12px;
+        }
+        .actions {
+            margin-top: 12px;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+        }
+        .small {
+            color: #9ca3af;
+            font-size: 12px;
+        }
+        a { color: #38bdf8; }
+    </style>
+</head>
+<body>
+<header>
+    <h1>Binance Spot + Futures Bot PRO Dashboard</h1>
+    <div class="subtitle">Structure + Orderbook + BOS/Sweep + Smart Exit Manager</div>
+</header>
+
+<div class="wrap">
+    <div class="grid">
+        <div class="card">
+            <h3>Server</h3>
+            <div id="serverStatus" class="value yellow">Loading...</div>
+            <div id="serviceName" class="small"></div>
+        </div>
+        <div class="card">
+            <h3>Execution</h3>
+            <div id="executionStatus" class="value yellow">Loading...</div>
+            <div id="defaultExchange" class="small"></div>
+        </div>
+        <div class="card">
+            <h3>Futures Websocket</h3>
+            <div id="wsStatus" class="value yellow">Loading...</div>
+            <div id="wsError" class="small"></div>
+        </div>
+        <div class="card">
+            <h3>Open Positions</h3>
+            <div id="openCount" class="value blue">0</div>
+            <div class="small">Active bot-tracked positions</div>
+        </div>
+    </div>
+
+    <div class="card">
+        <h3>Quick Controls</h3>
+        <div class="actions">
+            <button onclick="startWs()">Start Futures WS</button>
+            <button class="gray" onclick="stopWs()">Stop Futures WS</button>
+            <button onclick="syncFutures()">Sync Futures</button>
+            <button class="gray" onclick="refreshAll()">Refresh</button>
+            <a href="/docs" target="_blank"><button class="gray">Open API Docs</button></a>
+        </div>
+        <div id="controlResult" class="small" style="margin-top:10px;"></div>
+    </div>
+
+    <div class="card">
+        <h3>Open Positions</h3>
+        <div style="overflow-x:auto;">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Status</th>
+                        <th>Symbol</th>
+                        <th>Side</th>
+                        <th>Exchange</th>
+                        <th>Entry</th>
+                        <th>Stop</th>
+                        <th>Qty</th>
+                        <th>Risk</th>
+                        <th>BE</th>
+                        <th>Trail</th>
+                        <th>Action</th>
+                    </tr>
+                </thead>
+                <tbody id="positionsBody">
+                    <tr><td colspan="11">Loading...</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <div class="grid">
+        <div class="card">
+            <h3>Latest Journal</h3>
+            <pre id="journalBox">Loading...</pre>
+        </div>
+        <div class="card">
+            <h3>Websocket Detail</h3>
+            <pre id="wsBox">Loading...</pre>
+        </div>
+    </div>
+</div>
+
+<script>
+async function getJson(url, opts={}) {
+    const res = await fetch(url, opts);
+    if (!res.ok) {
+        const txt = await res.text();
+        throw new Error(res.status + " " + txt);
+    }
+    return await res.json();
+}
+
+function fmt(n) {
+    if (n === null || n === undefined) return "";
+    if (typeof n === "number") return Number(n).toFixed(6).replace(/0+$/,'').replace(/\.$/,'');
+    return n;
+}
+
+async function loadRoot() {
+    const data = await getJson("/");
+    document.getElementById("serverStatus").textContent = data.status || "unknown";
+    document.getElementById("serverStatus").className = "value green";
+    document.getElementById("serviceName").textContent = data.service || "";
+}
+
+async function loadConfig() {
+    const data = await getJson("/config");
+    document.getElementById("executionStatus").textContent = data.execution_enabled ? "LIVE ON" : "SAFE / PAPER";
+    document.getElementById("executionStatus").className = data.execution_enabled ? "value red" : "value green";
+    document.getElementById("defaultExchange").textContent = "Default: " + data.default_exchange + " | Risk: " + data.max_risk_pct_per_trade + "%";
+}
+
+async function loadWs() {
+    const data = await getJson("/futures/ws/status");
+    document.getElementById("wsStatus").textContent = data.running ? "RUNNING" : "OFF";
+    document.getElementById("wsStatus").className = data.running ? "value green" : "value yellow";
+    document.getElementById("wsError").textContent = data.last_error ? "Error: " + data.last_error : "No error";
+    document.getElementById("wsBox").textContent = JSON.stringify(data, null, 2);
+}
+
+async function loadPositions() {
+    const data = await getJson("/positions/open");
+    const rows = data.rows || [];
+    document.getElementById("openCount").textContent = rows.length;
+    const body = document.getElementById("positionsBody");
+    if (rows.length === 0) {
+        body.innerHTML = '<tr><td colspan="11" class="small">No open positions</td></tr>';
+        return;
+    }
+    body.innerHTML = rows.map(p => `
+        <tr>
+            <td><span class="pill open">${p.status}</span></td>
+            <td>${p.ticker}</td>
+            <td><span class="pill ${p.signal}">${p.signal}</span></td>
+            <td>${p.exchange}</td>
+            <td>${fmt(p.entry_price)}</td>
+            <td>${fmt(p.stop_price)}</td>
+            <td>${fmt(p.qty)}</td>
+            <td>${fmt(p.risk_usd)}</td>
+            <td>${p.break_even_armed ? "YES" : "NO"}</td>
+            <td>${p.trail_armed ? "YES" : "NO"}</td>
+            <td><button class="danger" onclick="closePosition('${p.id}')">Close</button></td>
+        </tr>
+    `).join("");
+}
+
+async function loadJournal() {
+    try {
+        const data = await getJson("/journal/recent?limit=8");
+        document.getElementById("journalBox").textContent = JSON.stringify(data.rows || [], null, 2);
+    } catch (e) {
+        document.getElementById("journalBox").textContent = "Journal unavailable: " + e.message;
+    }
+}
+
+async function startWs() {
+    try {
+        const data = await getJson("/futures/ws/start", {method:"POST"});
+        document.getElementById("controlResult").textContent = JSON.stringify(data);
+        setTimeout(refreshAll, 1000);
+    } catch(e) {
+        document.getElementById("controlResult").textContent = e.message;
+    }
+}
+
+async function stopWs() {
+    try {
+        const data = await getJson("/futures/ws/stop", {method:"POST"});
+        document.getElementById("controlResult").textContent = JSON.stringify(data);
+        setTimeout(refreshAll, 1000);
+    } catch(e) {
+        document.getElementById("controlResult").textContent = e.message;
+    }
+}
+
+async function syncFutures() {
+    try {
+        const data = await getJson("/futures/sync-open", {method:"POST"});
+        document.getElementById("controlResult").textContent = JSON.stringify(data);
+        setTimeout(refreshAll, 1000);
+    } catch(e) {
+        document.getElementById("controlResult").textContent = e.message;
+    }
+}
+
+async function closePosition(id) {
+    if (!confirm("Close this position?")) return;
+    try {
+        const data = await getJson("/positions/close/" + id, {method:"POST"});
+        document.getElementById("controlResult").textContent = JSON.stringify(data);
+        setTimeout(refreshAll, 1000);
+    } catch(e) {
+        document.getElementById("controlResult").textContent = e.message;
+    }
+}
+
+async function refreshAll() {
+    await Promise.allSettled([loadRoot(), loadConfig(), loadWs(), loadPositions(), loadJournal()]);
+}
+
+refreshAll();
+setInterval(refreshAll, 10000);
+</script>
+</body>
+</html>
+"""
+
+
+
 @app.get("/")
 def root():
-    return {"status": "ok", "service": "binance-spot-futures-bot-pro-final-bos-sweep", "time": now_iso()}
+    return {"status": "ok", "service": "binance-spot-futures-bot-pro-final-dashboard-v1", "time": now_iso()}
 
 
 @app.get("/config")

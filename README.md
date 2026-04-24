@@ -1,16 +1,14 @@
-# Binance Bot PRO Final + BOS Sweep
+# Binance Bot PRO Dashboard V1
 
 Adds:
-- structure filter
-- futures orderbook pressure filter
-- BOS filter
-- liquidity sweep filter
-- volume/candle quality fields
-- blocks weak setups before execution
+- /dashboard web page
+- bot health cards
+- open positions table
+- websocket status
+- recent journal viewer
+- start/stop websocket buttons
+- sync futures button
+- manual close position buttons
 
-New TradingView extra fields:
-- bos
-- sweep
-- sweep_direction: bullish / bearish / none
-- volume_spike
-- candle_confirm
+Open:
+https://YOUR-DOMAIN/dashboard
