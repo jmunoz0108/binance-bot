@@ -1691,216 +1691,346 @@ def scanner_status():
     }
 
 
+
+def safe_json_loads(raw):
+    try:
+        return json.loads(raw or "{}")
+    except Exception:
+        return {}
+
+
+def get_all_positions(limit: int = 500):
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute("SELECT * FROM positions ORDER BY created_at DESC LIMIT ?", (max(1, min(limit, 1000)),)).fetchall()
+        return [dict(r) for r in rows]
+
+
+def estimate_position_pnl(position: Dict[str, Any]):
+    meta = safe_json_loads(position.get("metadata_json"))
+    entry = float(position.get("entry_price") or 0)
+    qty = float(position.get("qty") or 0)
+    signal = position.get("signal")
+
+    # Try to find close fill from manager close_result
+    close_avg = None
+    close_qty = qty
+    last_check = meta.get("last_manage_check", {})
+    for action in last_check.get("actions", []):
+        if action.get("type") == "close_position":
+            cr = action.get("close_result") or {}
+            j = cr.get("json") or {}
+            try:
+                close_avg = float(j.get("avgPrice", 0) or 0)
+                close_qty = float(j.get("executedQty", qty) or qty)
+            except Exception:
+                pass
+
+    if close_avg is None:
+        return {"realized": None, "close_price": None, "close_qty": close_qty}
+
+    if signal in ["long", "buy"]:
+        pnl = (close_avg - entry) * close_qty
+    else:
+        pnl = (entry - close_avg) * close_qty
+
+    return {"realized": pnl, "close_price": close_avg, "close_qty": close_qty}
+
+
+def dashboard_stats_data():
+    positions = get_all_positions(500)
+    open_positions = [p for p in positions if p.get("status") == "open"]
+    closed_positions = [p for p in positions if p.get("status") == "closed"]
+
+    realized_total = 0.0
+    wins = 0
+    losses = 0
+    breakeven = 0
+    pnl_rows = []
+
+    for p in closed_positions:
+        pnl_info = estimate_position_pnl(p)
+        pnl = pnl_info.get("realized")
+        if pnl is None:
+            continue
+        realized_total += pnl
+        if pnl > 0:
+            wins += 1
+        elif pnl < 0:
+            losses += 1
+        else:
+            breakeven += 1
+        pnl_rows.append({
+            "id": p.get("id"),
+            "ticker": p.get("ticker"),
+            "signal": p.get("signal"),
+            "exchange": p.get("exchange"),
+            "entry_price": p.get("entry_price"),
+            "close_price": pnl_info.get("close_price"),
+            "qty": pnl_info.get("close_qty"),
+            "pnl": pnl,
+            "created_at": p.get("created_at"),
+        })
+
+    total_counted = wins + losses + breakeven
+    win_rate = (wins / total_counted * 100.0) if total_counted > 0 else 0.0
+
+    watchlist = []
+    scanner_results = SCANNER_STATE.get("last_results", []) or []
+    for r in scanner_results:
+        if r.get("signal"):
+            watchlist.append({
+                "symbol": r.get("symbol"),
+                "signal": r.get("signal"),
+                "quality_score": r.get("quality_score") or r.get("elite_score"),
+                "structure": r.get("structure"),
+                "reason": "valid setup",
+                "orderbook": r.get("orderbook"),
+                "checks": r.get("checks"),
+                "execution": r.get("execution"),
+            })
+        else:
+            checks = r.get("checks", {})
+            quality = max(int(checks.get("long_quality", 0) or 0), int(checks.get("short_quality", 0) or 0))
+            if quality >= 1 or r.get("structure") in ["bullish", "bearish"]:
+                watchlist.append({
+                    "symbol": r.get("symbol"),
+                    "signal": None,
+                    "quality_score": quality,
+                    "structure": r.get("structure"),
+                    "reason": r.get("reason"),
+                    "orderbook": r.get("orderbook"),
+                    "checks": checks,
+                })
+
+    return {
+        "summary": {
+            "open_positions": len(open_positions),
+            "closed_positions": len(closed_positions),
+            "wins": wins,
+            "losses": losses,
+            "breakeven": breakeven,
+            "win_rate": win_rate,
+            "realized_pnl": realized_total,
+            "scanner_running": SCANNER_STATE.get("running", False),
+            "emergency_stop": SAFETY_STATE.get("emergency_stop", False),
+        },
+        "pnl_rows": pnl_rows[:100],
+        "watchlist": watchlist[:100],
+    }
+
+
+
+
 @app.get("/dashboard", response_class=HTMLResponse)
 def dashboard():
     return """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Binance Bot Dashboard</title>
+    <title>Monster Bot Dashboard</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
+        :root {
+            --bg: #070b12;
+            --panel: #101827;
+            --panel2: #0d1422;
+            --line: #243044;
+            --text: #e5e7eb;
+            --muted: #94a3b8;
+            --green: #22c55e;
+            --red: #ef4444;
+            --yellow: #facc15;
+            --blue: #38bdf8;
+            --purple: #a78bfa;
+            --orange: #fb923c;
+        }
+        * { box-sizing: border-box; }
         body {
             margin: 0;
-            font-family: Arial, sans-serif;
-            background: #0b0f19;
-            color: #e5e7eb;
+            background: radial-gradient(circle at top left, #12213a, var(--bg) 38%);
+            color: var(--text);
+            font-family: Inter, Segoe UI, Arial, sans-serif;
         }
         header {
-            padding: 22px;
-            background: #111827;
-            border-bottom: 1px solid #263244;
+            padding: 22px 28px;
+            border-bottom: 1px solid var(--line);
+            background: rgba(16,24,39,0.82);
+            backdrop-filter: blur(10px);
+            position: sticky;
+            top: 0;
+            z-index: 10;
         }
-        h1 {
-            margin: 0;
-            font-size: 24px;
-        }
-        .subtitle {
-            color: #9ca3af;
-            margin-top: 6px;
-        }
-        .wrap {
-            padding: 20px;
-            max-width: 1400px;
-            margin: auto;
-        }
-        .grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
-            gap: 16px;
-            margin-bottom: 20px;
-        }
+        h1 { margin: 0; font-size: 24px; letter-spacing: .2px; }
+        .subtitle { color: var(--muted); margin-top: 5px; font-size: 13px; }
+        .wrap { max-width: 1500px; margin: auto; padding: 20px; }
+        .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 14px; }
+        .grid2 { display: grid; grid-template-columns: 1.2fr .8fr; gap: 14px; margin-top: 14px; }
+        @media (max-width: 950px) { .grid2 { grid-template-columns: 1fr; } }
         .card {
-            background: #111827;
-            border: 1px solid #263244;
-            border-radius: 14px;
+            background: linear-gradient(180deg, rgba(16,24,39,.98), rgba(13,20,34,.98));
+            border: 1px solid var(--line);
+            border-radius: 18px;
             padding: 16px;
-            box-shadow: 0 8px 22px rgba(0,0,0,0.25);
+            box-shadow: 0 18px 40px rgba(0,0,0,.25);
         }
-        .card h3 {
-            margin: 0 0 8px 0;
-            font-size: 14px;
-            color: #9ca3af;
-            font-weight: normal;
-        }
-        .value {
-            font-size: 24px;
-            font-weight: bold;
-        }
-        .green { color: #22c55e; }
-        .red { color: #ef4444; }
-        .yellow { color: #eab308; }
-        .blue { color: #38bdf8; }
+        .card h3 { margin: 0 0 10px; color: var(--muted); font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: .08em; }
+        .big { font-size: 28px; font-weight: 800; }
+        .small { font-size: 12px; color: var(--muted); margin-top: 5px; }
+        .green { color: var(--green); }
+        .red { color: var(--red); }
+        .yellow { color: var(--yellow); }
+        .blue { color: var(--blue); }
+        .purple { color: var(--purple); }
+        .orange { color: var(--orange); }
         button {
+            border: 0;
+            border-radius: 12px;
+            padding: 10px 13px;
+            margin: 4px;
             background: #2563eb;
             color: white;
-            border: 0;
-            padding: 10px 13px;
-            border-radius: 10px;
             cursor: pointer;
-            margin: 3px;
-            font-weight: 600;
+            font-weight: 700;
         }
-        button:hover { background: #1d4ed8; }
+        button:hover { filter: brightness(1.15); }
+        button.gray { background: #334155; }
         button.danger { background: #dc2626; }
-        button.danger:hover { background: #b91c1c; }
-        button.gray { background: #374151; }
-        button.gray:hover { background: #4b5563; }
-        table {
-            width: 100%;
-            border-collapse: collapse;
-            margin-top: 10px;
-            overflow: hidden;
-            border-radius: 12px;
-        }
-        th, td {
-            text-align: left;
-            padding: 11px;
-            border-bottom: 1px solid #263244;
-            font-size: 13px;
-        }
-        th {
-            color: #9ca3af;
-            background: #0f172a;
-        }
-        tr:hover { background: #172033; }
-        .pill {
-            display: inline-block;
-            padding: 4px 9px;
-            border-radius: 999px;
-            font-size: 12px;
-            font-weight: bold;
-        }
-        .pill.open { background: rgba(34,197,94,0.16); color: #22c55e; }
-        .pill.closed { background: rgba(156,163,175,0.16); color: #9ca3af; }
-        .pill.long { background: rgba(34,197,94,0.16); color: #22c55e; }
-        .pill.short { background: rgba(239,68,68,0.16); color: #ef4444; }
-        pre {
-            background: #020617;
-            border: 1px solid #263244;
-            padding: 12px;
-            border-radius: 12px;
-            overflow: auto;
-            max-height: 340px;
-            font-size: 12px;
-        }
-        .actions {
-            margin-top: 12px;
-            display: flex;
-            flex-wrap: wrap;
-            gap: 6px;
-        }
-        .small {
-            color: #9ca3af;
-            font-size: 12px;
-        }
-        a { color: #38bdf8; }
+        button.greenbtn { background: #16a34a; }
+        table { width: 100%; border-collapse: collapse; }
+        th, td { padding: 10px; border-bottom: 1px solid var(--line); font-size: 13px; text-align: left; vertical-align: top; }
+        th { color: var(--muted); background: rgba(15,23,42,.7); position: sticky; top: 0; }
+        tbody tr:hover { background: rgba(56,189,248,.05); }
+        .scroll { overflow: auto; max-height: 430px; border-radius: 12px; border: 1px solid var(--line); }
+        .pill { display: inline-flex; align-items:center; padding: 4px 8px; border-radius: 999px; font-size: 12px; font-weight: 800; }
+        .pill.long, .pill.win, .pill.buy { color: var(--green); background: rgba(34,197,94,.15); }
+        .pill.short, .pill.loss, .pill.sell { color: var(--red); background: rgba(239,68,68,.15); }
+        .pill.neutral { color: var(--yellow); background: rgba(250,204,21,.13); }
+        .pill.open { color: var(--blue); background: rgba(56,189,248,.15); }
+        .pill.closed { color: var(--muted); background: rgba(148,163,184,.15); }
+        pre { background: #020617; color: #cbd5e1; border: 1px solid var(--line); padding: 12px; border-radius: 14px; overflow:auto; max-height: 360px; font-size: 12px; }
+        .controls { display:flex; flex-wrap:wrap; gap:6px; }
+        .barWrap { height: 8px; background:#1e293b; border-radius:99px; overflow:hidden; margin-top:8px; }
+        .bar { height:100%; background: linear-gradient(90deg, var(--red), var(--yellow), var(--green)); width:0%; }
+        .sectionTitle { margin: 20px 0 10px; font-size: 16px; color:#cbd5e1; font-weight:800; }
+        a { color: var(--blue); }
     </style>
 </head>
 <body>
 <header>
-    <h1>Binance Spot + Futures Bot PRO Dashboard</h1>
-    <div class="subtitle">Structure + Orderbook + BOS/Sweep + Smart Exit Manager</div>
+    <h1>Monster Bot Dashboard</h1>
+    <div class="subtitle">Auto Discovery • Scanner • Structure • Orderbook • BOS/Sweep • Continuation • PnL</div>
 </header>
 
 <div class="wrap">
     <div class="grid">
         <div class="card">
             <h3>Server</h3>
-            <div id="serverStatus" class="value yellow">Loading...</div>
+            <div id="serverStatus" class="big yellow">Loading</div>
             <div id="serviceName" class="small"></div>
         </div>
         <div class="card">
             <h3>Execution</h3>
-            <div id="executionStatus" class="value yellow">Loading...</div>
-            <div id="defaultExchange" class="small"></div>
+            <div id="executionStatus" class="big yellow">Loading</div>
+            <div id="riskLine" class="small"></div>
         </div>
         <div class="card">
-            <h3>Futures Websocket</h3>
-            <div id="wsStatus" class="value yellow">Loading...</div>
-            <div id="wsError" class="small"></div>
+            <h3>Scanner</h3>
+            <div id="scannerStatus" class="big yellow">Loading</div>
+            <div id="scannerLine" class="small"></div>
         </div>
         <div class="card">
-            <h3>Open Positions</h3>
-            <div id="openCount" class="value blue">0</div>
-            <div class="small">Active bot-tracked positions</div>
+            <h3>Safety</h3>
+            <div id="safetyStatus" class="big yellow">Loading</div>
+            <div id="safetyLine" class="small"></div>
         </div>
     </div>
 
-    <div class="card">
-        <h3>Quick Controls</h3>
-        <div class="actions">
+    <div class="grid" style="margin-top:14px;">
+        <div class="card">
+            <h3>Open Positions</h3>
+            <div id="openCount" class="big blue">0</div>
+            <div class="small">Currently tracked open trades</div>
+        </div>
+        <div class="card">
+            <h3>Realized PnL</h3>
+            <div id="realizedPnl" class="big yellow">$0.00</div>
+            <div class="small">Estimated from bot close fills</div>
+        </div>
+        <div class="card">
+            <h3>Win Rate</h3>
+            <div id="winRate" class="big purple">0%</div>
+            <div class="barWrap"><div id="winBar" class="bar"></div></div>
+            <div id="wlLine" class="small"></div>
+        </div>
+        <div class="card">
+            <h3>Watchlist Setups</h3>
+            <div id="watchCount" class="big orange">0</div>
+            <div class="small">Scanner interested / near-valid setups</div>
+        </div>
+    </div>
+
+    <div class="card" style="margin-top:14px;">
+        <h3>Controls</h3>
+        <div class="controls">
+            <button class="greenbtn" onclick="startScanner()">Start Scanner</button>
+            <button class="gray" onclick="stopScanner()">Stop Scanner</button>
+            <button onclick="scanOnce()">Scan Once</button>
+            <button onclick="refreshDiscovery()">Refresh Symbols</button>
             <button onclick="startWs()">Start Futures WS</button>
             <button class="gray" onclick="stopWs()">Stop Futures WS</button>
             <button onclick="syncFutures()">Sync Futures</button>
-            <button onclick="startScanner()">Start Scanner</button><button class="gray" onclick="stopScanner()">Stop Scanner</button><button class="danger" onclick="emergencyStop()">Emergency Stop</button><button onclick="resumeSafety()">Resume</button><button onclick="scanOnce()">Scan Once</button><button onclick="refreshDiscovery()">Refresh Symbols</button><button class="gray" onclick="refreshAll()">Refresh</button>
-            <a href="/docs" target="_blank"><button class="gray">Open API Docs</button></a>
+            <button class="danger" onclick="emergencyStop()">Emergency Stop</button>
+            <button onclick="resumeSafety()">Resume</button>
+            <button class="gray" onclick="refreshAll()">Refresh</button>
+            <a href="/docs" target="_blank"><button class="gray">API Docs</button></a>
         </div>
-        <div id="controlResult" class="small" style="margin-top:10px;"></div>
+        <div id="controlResult" class="small"></div>
     </div>
 
+    <div class="sectionTitle">Open Positions</div>
     <div class="card">
-        <h3>Open Positions</h3>
-        <div style="overflow-x:auto;">
+        <div class="scroll">
             <table>
-                <thead>
-                    <tr>
-                        <th>Status</th>
-                        <th>Symbol</th>
-                        <th>Side</th>
-                        <th>Exchange</th>
-                        <th>Entry</th>
-                        <th>Stop</th>
-                        <th>Qty</th>
-                        <th>Risk</th>
-                        <th>BE</th>
-                        <th>Trail</th>
-                        <th>Action</th>
-                    </tr>
-                </thead>
-                <tbody id="positionsBody">
-                    <tr><td colspan="11">Loading...</td></tr>
-                </tbody>
+                <thead><tr><th>Status</th><th>Symbol</th><th>Side</th><th>Exchange</th><th>Entry</th><th>Stop</th><th>Qty</th><th>Risk</th><th>BE</th><th>Trail</th><th>Action</th></tr></thead>
+                <tbody id="positionsBody"><tr><td colspan="11">Loading...</td></tr></tbody>
             </table>
         </div>
     </div>
 
-    <div class="grid">
-        <div class="card">
-            <h3>Latest Journal</h3>
-            <pre id="journalBox">Loading...</pre>
+    <div class="grid2">
+        <div>
+            <div class="sectionTitle">Scanner Watchlist / Interested Setups</div>
+            <div class="card">
+                <div class="scroll">
+                    <table>
+                        <thead><tr><th>Symbol</th><th>Signal</th><th>Structure</th><th>Quality</th><th>Orderbook</th><th>Reason</th></tr></thead>
+                        <tbody id="watchBody"><tr><td colspan="6">Loading...</td></tr></tbody>
+                    </table>
+                </div>
+            </div>
         </div>
-        <div class="card">
-            <h3>Websocket Detail</h3>
-            <pre id="wsBox">Loading...</pre>
+        <div>
+            <div class="sectionTitle">Scanner Status</div>
+            <div class="card"><pre id="scannerBox">Loading...</pre></div>
         </div>
-        <div class="card">
-            <h3>Scanner Status</h3>
-            <pre id="scannerBox">Loading...</pre>
+    </div>
+
+    <div class="grid2">
+        <div>
+            <div class="sectionTitle">Closed Trades / PnL</div>
+            <div class="card">
+                <div class="scroll">
+                    <table>
+                        <thead><tr><th>Symbol</th><th>Side</th><th>Entry</th><th>Exit</th><th>Qty</th><th>PnL</th><th>Time</th></tr></thead>
+                        <tbody id="pnlBody"><tr><td colspan="7">Loading...</td></tr></tbody>
+                    </table>
+                </div>
+            </div>
         </div>
-        <div class="card">
-            <h3>Safety Status</h3>
-            <pre id="safetyBox">Loading...</pre>
+        <div>
+            <div class="sectionTitle">System Detail</div>
+            <div class="card"><pre id="systemBox">Loading...</pre></div>
         </div>
     </div>
 </div>
@@ -1908,206 +2038,152 @@ def dashboard():
 <script>
 async function getJson(url, opts={}) {
     const res = await fetch(url, opts);
-    if (!res.ok) {
-        const txt = await res.text();
-        throw new Error(res.status + " " + txt);
-    }
+    if (!res.ok) throw new Error(res.status + " " + await res.text());
     return await res.json();
 }
-
+function money(n) {
+    if (n === null || n === undefined || isNaN(n)) return "$0.00";
+    return "$" + Number(n).toFixed(4);
+}
 function fmt(n) {
     if (n === null || n === undefined) return "";
     if (typeof n === "number") return Number(n).toFixed(6).replace(/0+$/,'').replace(/\.$/,'');
     return n;
 }
+function pill(txt, cls="neutral") { return `<span class="pill ${cls}">${txt ?? ""}</span>`; }
 
 async function loadRoot() {
-    const data = await getJson("/");
-    document.getElementById("serverStatus").textContent = data.status || "unknown";
-    document.getElementById("serverStatus").className = "value green";
-    document.getElementById("serviceName").textContent = data.service || "";
+    const d = await getJson("/");
+    document.getElementById("serverStatus").textContent = d.status || "unknown";
+    document.getElementById("serverStatus").className = "big green";
+    document.getElementById("serviceName").textContent = d.service || "";
 }
-
 async function loadConfig() {
-    const data = await getJson("/config");
-    document.getElementById("executionStatus").textContent = data.execution_enabled ? "LIVE ON" : "SAFE / PAPER";
-    document.getElementById("executionStatus").className = data.execution_enabled ? "value red" : "value green";
-    document.getElementById("defaultExchange").textContent = "Default: " + data.default_exchange + " | Risk: " + data.max_risk_pct_per_trade + "%";
+    const d = await getJson("/config");
+    document.getElementById("executionStatus").textContent = d.execution_enabled ? "LIVE ON" : "SAFE";
+    document.getElementById("executionStatus").className = d.execution_enabled ? "big red" : "big green";
+    document.getElementById("riskLine").textContent = `Default: ${d.default_exchange} | Risk: ${d.max_risk_pct_per_trade}% | AutoRisk: ${d.auto_risk_enabled}`;
 }
-
-async function loadWs() {
-    const data = await getJson("/futures/ws/status");
-    document.getElementById("wsStatus").textContent = data.running ? "RUNNING" : "OFF";
-    document.getElementById("wsStatus").className = data.running ? "value green" : "value yellow";
-    document.getElementById("wsError").textContent = data.last_error ? "Error: " + data.last_error : "No error";
-    document.getElementById("wsBox").textContent = JSON.stringify(data, null, 2);
+async function loadSafety() {
+    const d = await getJson("/safety/status");
+    document.getElementById("safetyStatus").textContent = d.emergency_stop ? "STOPPED" : "OK";
+    document.getElementById("safetyStatus").className = d.emergency_stop ? "big red" : "big green";
+    document.getElementById("safetyLine").textContent = d.session_reason || "";
+    return d;
 }
+async function loadScanner() {
+    const d = await getJson("/scanner/status");
+    document.getElementById("scannerStatus").textContent = d.running ? "RUNNING" : "OFF";
+    document.getElementById("scannerStatus").className = d.running ? "big green" : "big yellow";
+    document.getElementById("scannerLine").textContent = `${d.symbols?.length || 0} symbols | ${d.exchange} | ${d.interval}`;
+    document.getElementById("scannerBox").textContent = JSON.stringify(d, null, 2);
 
+    const interested = [];
+    (d.last_results || []).forEach(r => {
+        const checks = r.checks || {};
+        const q = r.quality_score ?? r.elite_score ?? Math.max(checks.long_quality || 0, checks.short_quality || 0);
+        if (r.signal || q >= 1 || ["bullish","bearish"].includes(r.structure)) interested.push({...r, q});
+    });
+    document.getElementById("watchCount").textContent = interested.length;
+    const body = document.getElementById("watchBody");
+    if (!interested.length) {
+        body.innerHTML = '<tr><td colspan="6" class="small">No interesting setups right now</td></tr>';
+    } else {
+        body.innerHTML = interested.slice(0, 60).map(r => {
+            const ob = r.orderbook || {};
+            const sigCls = r.signal === "long" ? "long" : r.signal === "short" ? "short" : "neutral";
+            return `<tr>
+                <td>${r.symbol || ""}</td>
+                <td>${pill(r.signal || "watch", sigCls)}</td>
+                <td>${r.structure || ""}</td>
+                <td>${r.q ?? ""}</td>
+                <td>${ob.pressure || ""} ${ob.ratio ? "(" + Number(ob.ratio).toFixed(2) + ")" : ""}</td>
+                <td>${r.reason || (r.execution ? JSON.stringify(r.execution) : "")}</td>
+            </tr>`;
+        }).join("");
+    }
+    return d;
+}
 async function loadPositions() {
-    const data = await getJson("/positions/open");
-    const rows = data.rows || [];
+    const d = await getJson("/positions/open");
+    const rows = d.rows || [];
     document.getElementById("openCount").textContent = rows.length;
     const body = document.getElementById("positionsBody");
-    if (rows.length === 0) {
+    if (!rows.length) {
         body.innerHTML = '<tr><td colspan="11" class="small">No open positions</td></tr>';
         return;
     }
-    body.innerHTML = rows.map(p => `
-        <tr>
-            <td><span class="pill open">${p.status}</span></td>
-            <td>${p.ticker}</td>
-            <td><span class="pill ${p.signal}">${p.signal}</span></td>
-            <td>${p.exchange}</td>
-            <td>${fmt(p.entry_price)}</td>
-            <td>${fmt(p.stop_price)}</td>
-            <td>${fmt(p.qty)}</td>
-            <td>${fmt(p.risk_usd)}</td>
-            <td>${p.break_even_armed ? "YES" : "NO"}</td>
-            <td>${p.trail_armed ? "YES" : "NO"}</td>
-            <td><button class="danger" onclick="closePosition('${p.id}')">Close</button></td>
-        </tr>
-    `).join("");
+    body.innerHTML = rows.map(p => `<tr>
+        <td>${pill(p.status, "open")}</td>
+        <td>${p.ticker}</td>
+        <td>${pill(p.signal, p.signal)}</td>
+        <td>${p.exchange}</td>
+        <td>${fmt(p.entry_price)}</td>
+        <td>${fmt(p.stop_price)}</td>
+        <td>${fmt(p.qty)}</td>
+        <td>${fmt(p.risk_usd)}</td>
+        <td>${p.break_even_armed ? "YES" : "NO"}</td>
+        <td>${p.trail_armed ? "YES" : "NO"}</td>
+        <td><button class="danger" onclick="closePosition('${p.id}')">Close</button></td>
+    </tr>`).join("");
 }
+async function loadStats() {
+    const d = await getJson("/dashboard/stats");
+    const s = d.summary || {};
+    document.getElementById("realizedPnl").textContent = money(s.realized_pnl || 0);
+    document.getElementById("realizedPnl").className = (s.realized_pnl || 0) >= 0 ? "big green" : "big red";
+    document.getElementById("winRate").textContent = Number(s.win_rate || 0).toFixed(1) + "%";
+    document.getElementById("winBar").style.width = Math.min(100, Math.max(0, s.win_rate || 0)) + "%";
+    document.getElementById("wlLine").textContent = `W: ${s.wins || 0} | L: ${s.losses || 0} | BE: ${s.breakeven || 0}`;
 
-async function loadJournal() {
-    try {
-        const data = await getJson("/journal/recent?limit=8");
-        document.getElementById("journalBox").textContent = JSON.stringify(data.rows || [], null, 2);
-    } catch (e) {
-        document.getElementById("journalBox").textContent = "Journal unavailable: " + e.message;
+    const body = document.getElementById("pnlBody");
+    const rows = d.pnl_rows || [];
+    if (!rows.length) {
+        body.innerHTML = '<tr><td colspan="7" class="small">No closed trades with PnL yet</td></tr>';
+    } else {
+        body.innerHTML = rows.map(r => `<tr>
+            <td>${r.ticker}</td>
+            <td>${pill(r.signal, r.signal)}</td>
+            <td>${fmt(r.entry_price)}</td>
+            <td>${fmt(r.close_price)}</td>
+            <td>${fmt(r.qty)}</td>
+            <td class="${(r.pnl || 0) >= 0 ? "green" : "red"}">${money(r.pnl)}</td>
+            <td>${r.created_at || ""}</td>
+        </tr>`).join("");
     }
+    return d;
+}
+async function loadSystem() {
+    const [ws, safety] = await Promise.allSettled([getJson("/futures/ws/status"), getJson("/safety/status")]);
+    document.getElementById("systemBox").textContent = JSON.stringify({
+        websocket: ws.value || ws.reason?.message,
+        safety: safety.value || safety.reason?.message
+    }, null, 2);
 }
 
-async function startWs() {
+async function startScanner(){ await action("/scanner/start", "POST"); }
+async function stopScanner(){ await action("/scanner/stop", "POST"); }
+async function scanOnce(){ await action("/scanner/scan-once", "POST"); }
+async function refreshDiscovery(){ await action("/scanner/discover-refresh", "POST"); }
+async function startWs(){ await action("/futures/ws/start", "POST"); }
+async function stopWs(){ await action("/futures/ws/stop", "POST"); }
+async function syncFutures(){ await action("/futures/sync-open", "POST"); }
+async function emergencyStop(){ if(confirm("Emergency stop?")) await action("/safety/emergency-stop?reason=dashboard", "POST"); }
+async function resumeSafety(){ await action("/safety/resume", "POST"); }
+async function closePosition(id){ if(confirm("Close position?")) await action("/positions/close/" + id, "POST"); }
+
+async function action(url, method) {
     try {
-        const data = await getJson("/futures/ws/start", {method:"POST"});
-        document.getElementById("controlResult").textContent = JSON.stringify(data);
-        setTimeout(refreshAll, 1000);
+        const d = await getJson(url, {method});
+        document.getElementById("controlResult").textContent = JSON.stringify(d).slice(0, 500);
+        setTimeout(refreshAll, 800);
     } catch(e) {
         document.getElementById("controlResult").textContent = e.message;
     }
 }
-
-async function stopWs() {
-    try {
-        const data = await getJson("/futures/ws/stop", {method:"POST"});
-        document.getElementById("controlResult").textContent = JSON.stringify(data);
-        setTimeout(refreshAll, 1000);
-    } catch(e) {
-        document.getElementById("controlResult").textContent = e.message;
-    }
-}
-
-async function syncFutures() {
-    try {
-        const data = await getJson("/futures/sync-open", {method:"POST"});
-        document.getElementById("controlResult").textContent = JSON.stringify(data);
-        setTimeout(refreshAll, 1000);
-    } catch(e) {
-        document.getElementById("controlResult").textContent = e.message;
-    }
-}
-
-async function closePosition(id) {
-    if (!confirm("Close this position?")) return;
-    try {
-        const data = await getJson("/positions/close/" + id, {method:"POST"});
-        document.getElementById("controlResult").textContent = JSON.stringify(data);
-        setTimeout(refreshAll, 1000);
-    } catch(e) {
-        document.getElementById("controlResult").textContent = e.message;
-    }
-}
-
-
-async function loadScanner() {
-    try {
-        const data = await getJson("/scanner/status");
-        document.getElementById("scannerBox").textContent = JSON.stringify(data, null, 2);
-    } catch (e) {
-        const el = document.getElementById("scannerBox");
-        if (el) el.textContent = "Scanner unavailable: " + e.message;
-    }
-}
-
-
-async function refreshDiscovery() {
-    try {
-        const data = await getJson("/scanner/discover-refresh", {method:"POST"});
-        document.getElementById("controlResult").textContent = JSON.stringify({ok:data.ok,count:data.count});
-        setTimeout(refreshAll, 1000);
-    } catch(e) {
-        document.getElementById("controlResult").textContent = e.message;
-    }
-}
-
-async function startScanner() {
-    try {
-        const data = await getJson("/scanner/start", {method:"POST"});
-        document.getElementById("controlResult").textContent = JSON.stringify(data);
-        setTimeout(refreshAll, 1000);
-    } catch(e) {
-        document.getElementById("controlResult").textContent = e.message;
-    }
-}
-
-async function stopScanner() {
-    try {
-        const data = await getJson("/scanner/stop", {method:"POST"});
-        document.getElementById("controlResult").textContent = JSON.stringify(data);
-        setTimeout(refreshAll, 1000);
-    } catch(e) {
-        document.getElementById("controlResult").textContent = e.message;
-    }
-}
-
-async function scanOnce() {
-    try {
-        const data = await getJson("/scanner/scan-once", {method:"POST"});
-        document.getElementById("controlResult").textContent = JSON.stringify({ok:data.ok,count:data.count});
-        setTimeout(refreshAll, 1000);
-    } catch(e) {
-        document.getElementById("controlResult").textContent = e.message;
-    }
-}
-
-
-async function loadSafety() {
-    try {
-        const data = await getJson("/safety/status");
-        const el = document.getElementById("safetyBox");
-        if (el) el.textContent = JSON.stringify(data, null, 2);
-    } catch (e) {
-        const el = document.getElementById("safetyBox");
-        if (el) el.textContent = "Safety unavailable: " + e.message;
-    }
-}
-
-async function emergencyStop() {
-    if (!confirm("Emergency stop scanner/trading?")) return;
-    try {
-        const data = await getJson("/safety/emergency-stop?reason=dashboard", {method:"POST"});
-        document.getElementById("controlResult").textContent = JSON.stringify(data);
-        setTimeout(refreshAll, 1000);
-    } catch(e) {
-        document.getElementById("controlResult").textContent = e.message;
-    }
-}
-
-async function resumeSafety() {
-    try {
-        const data = await getJson("/safety/resume", {method:"POST"});
-        document.getElementById("controlResult").textContent = JSON.stringify(data);
-        setTimeout(refreshAll, 1000);
-    } catch(e) {
-        document.getElementById("controlResult").textContent = e.message;
-    }
-}
-
 async function refreshAll() {
-    await Promise.allSettled([loadRoot(), loadConfig(), loadWs(), loadPositions(), loadJournal(), loadScanner(), loadSafety()]);
+    await Promise.allSettled([loadRoot(), loadConfig(), loadSafety(), loadScanner(), loadPositions(), loadStats(), loadSystem()]);
 }
-
 refreshAll();
 setInterval(refreshAll, 10000);
 </script>
@@ -2116,23 +2192,14 @@ setInterval(refreshAll, 10000);
 """
 
 
-
-
-
-@app.on_event("startup")
-async def startup_services():
-    if WATCHDOG_ENABLED and SAFETY_STATE.get("watchdog_task") is None:
-        SAFETY_STATE["watchdog_task"] = asyncio.create_task(_watchdog_loop())
-
-    if SCANNER_AUTO_START and not SAFETY_STATE.get("emergency_stop") and not SCANNER_STATE.get("running"):
-        SCANNER_STATE["running"] = True
-        SCANNER_STATE["last_error"] = None
-        SCANNER_STATE["task"] = asyncio.create_task(_scanner_loop())
+@app.get("/dashboard/stats")
+def dashboard_stats():
+    return dashboard_stats_data()
 
 
 @app.get("/")
 def root():
-    return {"status": "ok", "service": "binance-spot-futures-bot-pro-final-monster-v1", "time": now_iso()}
+    return {"status": "ok", "service": "binance-spot-futures-bot-pro-final-dashboard-v2", "time": now_iso()}
 
 
 @app.get("/config")
