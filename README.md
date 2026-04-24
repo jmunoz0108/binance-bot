@@ -1,13 +1,9 @@
-# Binance Spot + Futures Bot PRO Final
+# Binance Bot PRO Final + Structure
 
-Includes:
-- paper mode
-- Binance Spot market execution
-- Binance Futures market execution
-- TradingView webhook endpoint
-- position manager with break-even and trailing logic
-- reversal-confirmed exits
-- futures websocket fill sync
-- Railway-ready deployment files
+Adds structure filter:
+- blocks sideways structure
+- blocks long trades in bearish structure
+- blocks short trades in bullish structure
+- allows old alerts when no structure data is sent
 
-Use paper mode first.
+Test locally first, then push to GitHub/Railway.
