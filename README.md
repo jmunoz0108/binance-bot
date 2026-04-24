@@ -1,14 +1,19 @@
-# Binance Bot PRO Dashboard V1
+# Binance Bot PRO Auto Scanner
 
-Adds:
-- /dashboard web page
-- bot health cards
-- open positions table
-- websocket status
-- recent journal viewer
-- start/stop websocket buttons
-- sync futures button
-- manual close position buttons
+Adds auto scanner:
+- scans configured Binance Futures symbols
+- detects structure, BOS, sweeps, volume, candle confirmation
+- checks futures orderbook pressure
+- can run in paper or live futures mode
+- dashboard controls: start/stop scanner, scan once
 
-Open:
-https://YOUR-DOMAIN/dashboard
+Endpoints:
+- POST /scanner/start
+- POST /scanner/stop
+- POST /scanner/scan-once
+- GET /scanner/status
+- GET /dashboard
+
+Start safely with:
+SCANNER_EXCHANGE=paper
+ENABLE_EXECUTION=false

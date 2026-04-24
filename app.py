@@ -48,6 +48,25 @@ REVERSAL_SCORE_TO_EXIT = int(os.getenv("REVERSAL_SCORE_TO_EXIT", "3"))
 
 WS_STATE: Dict[str, Any] = {"task": None, "running": False, "last_event": None, "listen_key": None, "last_error": None}
 
+SCANNER_ENABLED_DEFAULT = os.getenv("SCANNER_ENABLED_DEFAULT", "false").lower() == "true"
+SCANNER_EXCHANGE = os.getenv("SCANNER_EXCHANGE", "paper")
+SCANNER_SYMBOLS = [s.strip().upper() for s in os.getenv("SCANNER_SYMBOLS", "DOGEUSDT,SOLUSDT,XRPUSDT,ETHUSDT,BTCUSDT").split(",") if s.strip()]
+SCANNER_INTERVAL = os.getenv("SCANNER_INTERVAL", "5m")
+SCANNER_SLEEP_SECONDS = int(os.getenv("SCANNER_SLEEP_SECONDS", "60"))
+SCANNER_LIMIT = int(os.getenv("SCANNER_LIMIT", "120"))
+SCANNER_COOLDOWN_SECONDS = int(os.getenv("SCANNER_COOLDOWN_SECONDS", "900"))
+SCANNER_MIN_QUALITY = int(os.getenv("SCANNER_MIN_QUALITY", "2"))
+SCANNER_LEVERAGE = int(os.getenv("SCANNER_LEVERAGE", "2"))
+
+SCANNER_STATE: Dict[str, Any] = {
+    "task": None,
+    "running": False,
+    "last_scan": None,
+    "last_results": [],
+    "last_error": None,
+    "signals_sent": {},
+}
+
 
 class SignalPayload(BaseModel):
     signal: Literal["long", "short", "buy", "sell"]
@@ -948,6 +967,253 @@ async def _futures_ws_loop():
 
 
 
+
+
+def futures_klines(symbol: str, interval: str = "5m", limit: int = 120):
+    r = public_get(BINANCE_FUTURES_BASE_URL, "/fapi/v1/klines", {"symbol": symbol.upper(), "interval": interval, "limit": limit})
+    if r["status_code"] >= 400:
+        raise RuntimeError(r["text"])
+    rows = r["json"]
+    candles = []
+    for k in rows:
+        candles.append({
+            "open_time": int(k[0]),
+            "open": float(k[1]),
+            "high": float(k[2]),
+            "low": float(k[3]),
+            "close": float(k[4]),
+            "volume": float(k[5]),
+            "close_time": int(k[6]),
+        })
+    return candles
+
+
+def _pivot_highs_lows(candles: List[Dict[str, Any]], left: int = 3, right: int = 3):
+    piv_highs = []
+    piv_lows = []
+    n = len(candles)
+    for i in range(left, n - right):
+        h = candles[i]["high"]
+        l = candles[i]["low"]
+        is_high = all(h > candles[j]["high"] for j in range(i-left, i)) and all(h >= candles[j]["high"] for j in range(i+1, i+right+1))
+        is_low = all(l < candles[j]["low"] for j in range(i-left, i)) and all(l <= candles[j]["low"] for j in range(i+1, i+right+1))
+        if is_high:
+            piv_highs.append(h)
+        if is_low:
+            piv_lows.append(l)
+    return piv_highs[-3:], piv_lows[-3:]
+
+
+def analyze_symbol_for_setup(symbol: str):
+    candles = futures_klines(symbol, SCANNER_INTERVAL, SCANNER_LIMIT)
+    if len(candles) < 30:
+        return {"symbol": symbol, "signal": None, "reason": "not enough candles"}
+
+    last = candles[-1]
+    prev = candles[-2]
+    highs, lows = _pivot_highs_lows(candles)
+
+    if len(highs) < 3 or len(lows) < 3:
+        return {"symbol": symbol, "signal": None, "reason": "not enough pivots", "highs": highs, "lows": lows}
+
+    bull_structure = highs[-1] > highs[-2] and lows[-1] > lows[-2]
+    bear_structure = highs[-1] < highs[-2] and lows[-1] < lows[-2]
+
+    bull_bos = last["close"] > highs[-1]
+    bear_bos = last["close"] < lows[-1]
+    bull_sweep = last["low"] < lows[-1] and last["close"] > lows[-1]
+    bear_sweep = last["high"] > highs[-1] and last["close"] < highs[-1]
+
+    vols = [c["volume"] for c in candles[-21:-1]]
+    avg_vol = sum(vols) / len(vols) if vols else 0
+    volume_spike = last["volume"] > avg_vol * 1.5 if avg_vol > 0 else False
+
+    bull_candle = last["close"] > last["open"]
+    bear_candle = last["close"] < last["open"]
+
+    orderbook = get_orderbook_pressure(symbol)
+
+    long_quality = 0
+    if bull_bos: long_quality += 1
+    if bull_sweep: long_quality += 1
+    if volume_spike: long_quality += 1
+    if bull_candle: long_quality += 1
+
+    short_quality = 0
+    if bear_bos: short_quality += 1
+    if bear_sweep: short_quality += 1
+    if volume_spike: short_quality += 1
+    if bear_candle: short_quality += 1
+
+    long_ok = bull_structure and (bull_bos or bull_sweep) and bull_candle and long_quality >= SCANNER_MIN_QUALITY and orderbook.get("pressure") != "sellers"
+    short_ok = bear_structure and (bear_bos or bear_sweep) and bear_candle and short_quality >= SCANNER_MIN_QUALITY and orderbook.get("pressure") != "buyers"
+
+    if long_ok:
+        return {
+            "symbol": symbol,
+            "signal": "long",
+            "close": last["close"],
+            "quality_score": long_quality,
+            "structure": "bullish",
+            "orderbook": orderbook,
+            "extra": {
+                "highs": highs,
+                "lows": lows,
+                "bos": bool(bull_bos),
+                "sweep": bool(bull_sweep),
+                "sweep_direction": "bullish" if bull_sweep else "none",
+                "volume_spike": bool(volume_spike),
+                "candle_confirm": bool(bull_candle),
+                "scanner": True
+            }
+        }
+
+    if short_ok:
+        return {
+            "symbol": symbol,
+            "signal": "short",
+            "close": last["close"],
+            "quality_score": short_quality,
+            "structure": "bearish",
+            "orderbook": orderbook,
+            "extra": {
+                "highs": highs,
+                "lows": lows,
+                "bos": bool(bear_bos),
+                "sweep": bool(bear_sweep),
+                "sweep_direction": "bearish" if bear_sweep else "none",
+                "volume_spike": bool(volume_spike),
+                "candle_confirm": bool(bear_candle),
+                "scanner": True
+            }
+        }
+
+    return {
+        "symbol": symbol,
+        "signal": None,
+        "reason": "no valid setup",
+        "structure": "bullish" if bull_structure else "bearish" if bear_structure else "sideways",
+        "highs": highs,
+        "lows": lows,
+        "orderbook": orderbook,
+        "checks": {
+            "bull_bos": bull_bos,
+            "bear_bos": bear_bos,
+            "bull_sweep": bull_sweep,
+            "bear_sweep": bear_sweep,
+            "volume_spike": volume_spike,
+            "bull_candle": bull_candle,
+            "bear_candle": bear_candle,
+            "long_quality": long_quality,
+            "short_quality": short_quality,
+        }
+    }
+
+
+def run_scanner_once():
+    results = []
+    now_ts = int(datetime.now(timezone.utc).timestamp())
+
+    for symbol in SCANNER_SYMBOLS:
+        try:
+            analysis = analyze_symbol_for_setup(symbol)
+            results.append(analysis)
+
+            signal = analysis.get("signal")
+            if not signal:
+                continue
+
+            last_key = f"{symbol}:{signal}"
+            last_sent = SCANNER_STATE["signals_sent"].get(last_key, 0)
+            if now_ts - last_sent < SCANNER_COOLDOWN_SECONDS:
+                analysis["execution"] = {"approved": False, "reason": "scanner cooldown active"}
+                continue
+
+            payload = SignalPayload(
+                signal=signal,
+                ticker=symbol,
+                tf=SCANNER_INTERVAL,
+                close=float(analysis["close"]),
+                score=float(analysis.get("quality_score", 0)),
+                preset="Day Trading",
+                exchange=SCANNER_EXCHANGE,
+                secret=BOT_SECRET,
+                futures_mode="one_way",
+                margin_type="isolated",
+                leverage=SCANNER_LEVERAGE,
+                position_side="BOTH",
+                strategy="Auto Scanner BOS Sweep",
+                extra=analysis["extra"],
+            )
+
+            execution_result = execute(payload)
+            analysis["execution"] = execution_result
+            if execution_result.get("approved"):
+                SCANNER_STATE["signals_sent"][last_key] = now_ts
+
+        except Exception as exc:
+            results.append({"symbol": symbol, "signal": None, "reason": "scanner error", "error": str(exc)})
+
+    SCANNER_STATE["last_scan"] = now_iso()
+    SCANNER_STATE["last_results"] = results
+    return results
+
+
+async def _scanner_loop():
+    while SCANNER_STATE["running"]:
+        try:
+            run_scanner_once()
+            SCANNER_STATE["last_error"] = None
+        except Exception as exc:
+            SCANNER_STATE["last_error"] = str(exc)
+        await asyncio.sleep(SCANNER_SLEEP_SECONDS)
+
+
+
+
+
+@app.post("/scanner/start")
+async def scanner_start():
+    if SCANNER_STATE["running"]:
+        return {"ok": True, "reason": "scanner already running"}
+    SCANNER_STATE["running"] = True
+    SCANNER_STATE["last_error"] = None
+    SCANNER_STATE["task"] = asyncio.create_task(_scanner_loop())
+    return {"ok": True, "reason": "scanner started", "symbols": SCANNER_SYMBOLS, "exchange": SCANNER_EXCHANGE}
+
+
+@app.post("/scanner/stop")
+async def scanner_stop():
+    SCANNER_STATE["running"] = False
+    task = SCANNER_STATE.get("task")
+    if task:
+        task.cancel()
+    SCANNER_STATE["task"] = None
+    return {"ok": True, "reason": "scanner stopped"}
+
+
+@app.post("/scanner/scan-once")
+def scanner_scan_once():
+    results = run_scanner_once()
+    return {"ok": True, "count": len(results), "results": results}
+
+
+@app.get("/scanner/status")
+def scanner_status():
+    return {
+        "running": SCANNER_STATE["running"],
+        "symbols": SCANNER_SYMBOLS,
+        "exchange": SCANNER_EXCHANGE,
+        "interval": SCANNER_INTERVAL,
+        "sleep_seconds": SCANNER_SLEEP_SECONDS,
+        "cooldown_seconds": SCANNER_COOLDOWN_SECONDS,
+        "min_quality": SCANNER_MIN_QUALITY,
+        "last_scan": SCANNER_STATE["last_scan"],
+        "last_error": SCANNER_STATE["last_error"],
+        "last_results": SCANNER_STATE["last_results"],
+    }
+
+
 @app.get("/dashboard", response_class=HTMLResponse)
 def dashboard():
     return """
@@ -1110,7 +1376,7 @@ def dashboard():
             <button onclick="startWs()">Start Futures WS</button>
             <button class="gray" onclick="stopWs()">Stop Futures WS</button>
             <button onclick="syncFutures()">Sync Futures</button>
-            <button class="gray" onclick="refreshAll()">Refresh</button>
+            <button onclick="startScanner()">Start Scanner</button><button class="gray" onclick="stopScanner()">Stop Scanner</button><button onclick="scanOnce()">Scan Once</button><button class="gray" onclick="refreshAll()">Refresh</button>
             <a href="/docs" target="_blank"><button class="gray">Open API Docs</button></a>
         </div>
         <div id="controlResult" class="small" style="margin-top:10px;"></div>
@@ -1150,6 +1416,10 @@ def dashboard():
         <div class="card">
             <h3>Websocket Detail</h3>
             <pre id="wsBox">Loading...</pre>
+        </div>
+        <div class="card">
+            <h3>Scanner Status</h3>
+            <pre id="scannerBox">Loading...</pre>
         </div>
     </div>
 </div>
@@ -1268,8 +1538,49 @@ async function closePosition(id) {
     }
 }
 
+
+async function loadScanner() {
+    try {
+        const data = await getJson("/scanner/status");
+        document.getElementById("scannerBox").textContent = JSON.stringify(data, null, 2);
+    } catch (e) {
+        const el = document.getElementById("scannerBox");
+        if (el) el.textContent = "Scanner unavailable: " + e.message;
+    }
+}
+
+async function startScanner() {
+    try {
+        const data = await getJson("/scanner/start", {method:"POST"});
+        document.getElementById("controlResult").textContent = JSON.stringify(data);
+        setTimeout(refreshAll, 1000);
+    } catch(e) {
+        document.getElementById("controlResult").textContent = e.message;
+    }
+}
+
+async function stopScanner() {
+    try {
+        const data = await getJson("/scanner/stop", {method:"POST"});
+        document.getElementById("controlResult").textContent = JSON.stringify(data);
+        setTimeout(refreshAll, 1000);
+    } catch(e) {
+        document.getElementById("controlResult").textContent = e.message;
+    }
+}
+
+async function scanOnce() {
+    try {
+        const data = await getJson("/scanner/scan-once", {method:"POST"});
+        document.getElementById("controlResult").textContent = JSON.stringify({ok:data.ok,count:data.count});
+        setTimeout(refreshAll, 1000);
+    } catch(e) {
+        document.getElementById("controlResult").textContent = e.message;
+    }
+}
+
 async function refreshAll() {
-    await Promise.allSettled([loadRoot(), loadConfig(), loadWs(), loadPositions(), loadJournal()]);
+    await Promise.allSettled([loadRoot(), loadConfig(), loadWs(), loadPositions(), loadJournal(), loadScanner()]);
 }
 
 refreshAll();
@@ -1283,7 +1594,7 @@ setInterval(refreshAll, 10000);
 
 @app.get("/")
 def root():
-    return {"status": "ok", "service": "binance-spot-futures-bot-pro-final-dashboard-v1", "time": now_iso()}
+    return {"status": "ok", "service": "binance-spot-futures-bot-pro-final-auto-scanner", "time": now_iso()}
 
 
 @app.get("/config")
@@ -1299,6 +1610,9 @@ def config():
         "trail_trigger_r": TRAIL_TRIGGER_R,
         "trail_distance_r": TRAIL_DISTANCE_R,
         "reversal_score_to_exit": REVERSAL_SCORE_TO_EXIT,
+        "scanner_exchange": SCANNER_EXCHANGE,
+        "scanner_symbols": SCANNER_SYMBOLS,
+        "scanner_interval": SCANNER_INTERVAL,
     }
 
 
