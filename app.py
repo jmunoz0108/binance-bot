@@ -620,3 +620,29 @@ def futures_ws_status():
 def futures_sync_open_positions():
     positions = get_all_open_futures_positions()
     return {"count": len(positions), "results": [sync_single_futures_position_from_exchange(p) for p in positions]}
+    def structure_filter(data):
+    highs = data.get("highs", [])
+    lows = data.get("lows", [])
+
+    if len(highs) < 3 or len(lows) < 3:
+        return {"allow": False, "reason": "not enough structure"}
+
+    # simple structure logic
+    hh = highs[-1] > highs[-2]
+    hl = lows[-1] > lows[-2]
+    lh = highs[-1] < highs[-2]
+    ll = lows[-1] < lows[-2]
+
+    trend = None
+
+    if hh and hl:
+        trend = "bullish"
+    elif ll and lh:
+        trend = "bearish"
+    else:
+        trend = "sideways"
+
+    if trend == "sideways":
+        return {"allow": False, "reason": "sideways market"}
+
+    return {"allow": True, "trend": trend}
