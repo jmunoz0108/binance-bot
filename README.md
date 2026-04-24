@@ -1,17 +1,24 @@
-# Binance Bot PRO Auto Discovery
+# Binance Bot PRO Monster V1
 
-Adds auto symbol discovery:
-- pulls all Binance USDT perpetual futures symbols
-- filters by TRADING + PERPETUAL + USDT
-- ranks by 24h quote volume
-- scans top N symbols automatically
-- includes manual watchlist too if enabled
-- refreshes symbols every AUTO_DISCOVER_REFRESH_SECONDS
-- dashboard button: Refresh Symbols
+Adds final reliability + quality upgrades:
+- scanner auto-start on Railway boot
+- watchdog restarts scanner if it stops
+- emergency stop / resume endpoints
+- safety status endpoint
+- optional UTC session filter
+- optional multi-timeframe confirmation
+- auto-risk multiplier based on setup quality
+- positions history endpoint
+- dashboard emergency controls
 
-Recommended safe variables:
-SCANNER_EXCHANGE=paper
-AUTO_DISCOVER_SYMBOLS=true
-AUTO_DISCOVER_TOP_N=20
-AUTO_DISCOVER_MIN_QUOTE_VOLUME=50000000
-ENABLE_EXECUTION=false
+Important safe defaults:
+- SCANNER_EXCHANGE=paper
+- ENABLE_EXECUTION=false
+- SESSION_FILTER_ENABLED=false
+- MTF_CONFIRM_ENABLED=false
+
+After deploy:
+- / should show binance-spot-futures-bot-pro-final-monster-v1
+- /dashboard for control panel
+- /scanner/status for scanner
+- /safety/status for safety

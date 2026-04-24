@@ -72,6 +72,29 @@ AUTO_DISCOVER_REFRESH_SECONDS = int(os.getenv("AUTO_DISCOVER_REFRESH_SECONDS", "
 AUTO_DISCOVER_EXCLUDE = [s.strip().upper() for s in os.getenv("AUTO_DISCOVER_EXCLUDE", "").split(",") if s.strip()]
 AUTO_DISCOVER_INCLUDE_NEW = os.getenv("AUTO_DISCOVER_INCLUDE_NEW", "true").lower() == "true"
 
+
+SCANNER_AUTO_START = os.getenv("SCANNER_AUTO_START", "false").lower() == "true"
+WATCHDOG_ENABLED = os.getenv("WATCHDOG_ENABLED", "true").lower() == "true"
+WATCHDOG_SLEEP_SECONDS = int(os.getenv("WATCHDOG_SLEEP_SECONDS", "60"))
+
+SESSION_FILTER_ENABLED = os.getenv("SESSION_FILTER_ENABLED", "false").lower() == "true"
+SESSION_ALLOWED_UTC_RANGES = [s.strip() for s in os.getenv("SESSION_ALLOWED_UTC_RANGES", "07:00-17:00").split(",") if s.strip()]
+
+MTF_CONFIRM_ENABLED = os.getenv("MTF_CONFIRM_ENABLED", "false").lower() == "true"
+MTF_INTERVAL = os.getenv("MTF_INTERVAL", "15m")
+
+AUTO_RISK_ENABLED = os.getenv("AUTO_RISK_ENABLED", "true").lower() == "true"
+AUTO_RISK_BASE_MULTIPLIER = float(os.getenv("AUTO_RISK_BASE_MULTIPLIER", "1.0"))
+AUTO_RISK_HIGH_QUALITY_MULTIPLIER = float(os.getenv("AUTO_RISK_HIGH_QUALITY_MULTIPLIER", "1.25"))
+AUTO_RISK_LOW_QUALITY_MULTIPLIER = float(os.getenv("AUTO_RISK_LOW_QUALITY_MULTIPLIER", "0.60"))
+
+SAFETY_STATE: Dict[str, Any] = {
+    "emergency_stop": False,
+    "reason": None,
+    "changed_at": None,
+    "watchdog_task": None,
+}
+
 DISCOVERY_STATE: Dict[str, Any] = {
     "last_refresh": None,
     "symbols": [],
@@ -572,7 +595,13 @@ def build_order_plan(payload: SignalPayload):
     entry = float(payload.close)
     risk_pct = min(MAX_RISK_PCT_PER_TRADE, 0.50 if payload.preset in ["Scalping", "Day Trading"] else 0.75)
     stop_distance_pct = 0.7 if payload.tf in ["1", "3", "5"] else 1.0 if payload.tf in ["15", "30"] else 1.5
-    risk_usd = ACCOUNT_EQUITY_USD * (risk_pct / 100.0)
+    risk_multiplier = 1.0
+    try:
+        risk_multiplier = float((payload.extra or {}).get("risk_multiplier", 1.0))
+    except Exception:
+        risk_multiplier = 1.0
+    risk_multiplier = max(0.10, min(risk_multiplier, 2.0))
+    risk_usd = ACCOUNT_EQUITY_USD * (risk_pct / 100.0) * risk_multiplier
 
     if payload.signal in ["long", "buy"]:
         stop = entry * (1 - stop_distance_pct / 100.0)
@@ -718,6 +747,13 @@ def send_order_futures(payload: SignalPayload, plan: Dict[str, Any]):
 
 
 def execute(payload: SignalPayload):
+    if SAFETY_STATE.get("emergency_stop"):
+        return {"approved": False, "reason": f"emergency stop active: {SAFETY_STATE.get('reason')}"}
+
+    session_ok, session_reason = is_in_allowed_session()
+    if not session_ok:
+        return {"approved": False, "reason": session_reason}
+
     if not TRADING_ENABLED:
         return {"approved": False, "reason": "trading disabled by kill switch"}
 
@@ -1179,6 +1215,132 @@ def get_scanner_symbols():
 
 
 
+
+def is_in_allowed_session():
+    if not SESSION_FILTER_ENABLED:
+        return True, "session filter disabled"
+
+    now = datetime.now(timezone.utc)
+    current_minutes = now.hour * 60 + now.minute
+
+    for item in SESSION_ALLOWED_UTC_RANGES:
+        try:
+            start_s, end_s = item.split("-")
+            sh, sm = [int(x) for x in start_s.split(":")]
+            eh, em = [int(x) for x in end_s.split(":")]
+            start_m = sh * 60 + sm
+            end_m = eh * 60 + em
+
+            if start_m <= end_m:
+                if start_m <= current_minutes <= end_m:
+                    return True, f"inside session {item}"
+            else:
+                # Overnight range like 22:00-03:00
+                if current_minutes >= start_m or current_minutes <= end_m:
+                    return True, f"inside overnight session {item}"
+        except Exception:
+            continue
+
+    return False, "outside allowed trading session"
+
+
+def scanner_safety_ok():
+    if SAFETY_STATE.get("emergency_stop"):
+        return False, f"emergency stop active: {SAFETY_STATE.get('reason')}"
+    session_ok, session_reason = is_in_allowed_session()
+    if not session_ok:
+        return False, session_reason
+    return True, "safe"
+
+
+def structure_from_candles(candles: List[Dict[str, Any]]):
+    highs, lows = _pivot_highs_lows(candles)
+    if len(highs) < 3 or len(lows) < 3:
+        return {"trend": "unknown", "highs": highs, "lows": lows}
+
+    bull_structure = highs[-1] > highs[-2] and lows[-1] > lows[-2]
+    bear_structure = highs[-1] < highs[-2] and lows[-1] < lows[-2]
+
+    if bull_structure:
+        return {"trend": "bullish", "highs": highs, "lows": lows}
+    if bear_structure:
+        return {"trend": "bearish", "highs": highs, "lows": lows}
+    return {"trend": "sideways", "highs": highs, "lows": lows}
+
+
+def mtf_confirmation(symbol: str, desired_signal: str):
+    if not MTF_CONFIRM_ENABLED:
+        return {"enabled": False, "allow": True, "reason": "mtf disabled"}
+
+    try:
+        candles = futures_klines(symbol, MTF_INTERVAL, SCANNER_LIMIT)
+        st = structure_from_candles(candles)
+        trend = st.get("trend")
+
+        if desired_signal in ["long", "buy"]:
+            allow = trend == "bullish"
+            return {"enabled": True, "allow": allow, "trend": trend, "interval": MTF_INTERVAL, "reason": "mtf bullish" if allow else "mtf blocked long"}
+
+        if desired_signal in ["short", "sell"]:
+            allow = trend == "bearish"
+            return {"enabled": True, "allow": allow, "trend": trend, "interval": MTF_INTERVAL, "reason": "mtf bearish" if allow else "mtf blocked short"}
+
+        return {"enabled": True, "allow": False, "trend": trend, "interval": MTF_INTERVAL, "reason": "unknown signal"}
+
+    except Exception as exc:
+        return {"enabled": True, "allow": False, "reason": f"mtf error: {exc}"}
+
+
+def elite_score_from_analysis(analysis: Dict[str, Any]):
+    score = 0
+    checks = analysis.get("checks", {})
+    orderbook = analysis.get("orderbook", {})
+    signal = analysis.get("signal")
+
+    if signal in ["long", "buy"]:
+        if checks.get("bull_bos"): score += 2
+        if checks.get("bull_sweep"): score += 2
+        if checks.get("volume_spike"): score += 1
+        if checks.get("bull_candle"): score += 1
+        if orderbook.get("pressure") == "buyers": score += 1
+        if orderbook.get("pressure") == "sellers": score -= 2
+    elif signal in ["short", "sell"]:
+        if checks.get("bear_bos"): score += 2
+        if checks.get("bear_sweep"): score += 2
+        if checks.get("volume_spike"): score += 1
+        if checks.get("bear_candle"): score += 1
+        if orderbook.get("pressure") == "sellers": score += 1
+        if orderbook.get("pressure") == "buyers": score -= 2
+
+    if analysis.get("structure") in ["bullish", "bearish"]:
+        score += 1
+
+    return max(score, 0)
+
+
+def auto_risk_multiplier_from_score(score: int):
+    if not AUTO_RISK_ENABLED:
+        return AUTO_RISK_BASE_MULTIPLIER
+    if score >= 5:
+        return AUTO_RISK_HIGH_QUALITY_MULTIPLIER
+    if score <= 2:
+        return AUTO_RISK_LOW_QUALITY_MULTIPLIER
+    return AUTO_RISK_BASE_MULTIPLIER
+
+
+async def _watchdog_loop():
+    while WATCHDOG_ENABLED:
+        try:
+            if SCANNER_AUTO_START and not SAFETY_STATE.get("emergency_stop") and not SCANNER_STATE.get("running"):
+                SCANNER_STATE["running"] = True
+                SCANNER_STATE["last_error"] = None
+                SCANNER_STATE["task"] = asyncio.create_task(_scanner_loop())
+        except Exception as exc:
+            SAFETY_STATE["watchdog_error"] = str(exc)
+        await asyncio.sleep(WATCHDOG_SLEEP_SECONDS)
+
+
+
 def futures_klines(symbol: str, interval: str = "5m", limit: int = 120):
     r = public_get(BINANCE_FUTURES_BASE_URL, "/fapi/v1/klines", {"symbol": symbol.upper(), "interval": interval, "limit": limit})
     if r["status_code"] >= 400:
@@ -1344,6 +1506,12 @@ def run_scanner_once():
     results = []
     now_ts = int(datetime.now(timezone.utc).timestamp())
 
+    safe, safety_reason = scanner_safety_ok()
+    if not safe:
+        SCANNER_STATE["last_scan"] = now_iso()
+        SCANNER_STATE["last_results"] = [{"scanner_blocked": True, "reason": safety_reason}]
+        return SCANNER_STATE["last_results"]
+
     for symbol in get_scanner_symbols():
         try:
             analysis = analyze_symbol_for_setup(symbol)
@@ -1351,6 +1519,15 @@ def run_scanner_once():
 
             signal = analysis.get("signal")
             if not signal:
+                continue
+
+            analysis["elite_score"] = elite_score_from_analysis(analysis)
+            analysis["risk_multiplier"] = auto_risk_multiplier_from_score(analysis["elite_score"])
+
+            mtf = mtf_confirmation(symbol, signal)
+            analysis["mtf_confirmation"] = mtf
+            if not mtf.get("allow", True):
+                analysis["execution"] = {"approved": False, "reason": mtf.get("reason", "mtf blocked")}
                 continue
 
             last_key = f"{symbol}:{signal}"
@@ -1373,7 +1550,7 @@ def run_scanner_once():
                 leverage=SCANNER_LEVERAGE,
                 position_side="BOTH",
                 strategy="Auto Scanner BOS Sweep",
-                extra=analysis["extra"],
+                extra={**analysis["extra"], "elite_score": analysis.get("elite_score", 0), "risk_multiplier": analysis.get("risk_multiplier", 1.0), "mtf_confirmation": analysis.get("mtf_confirmation", {})},
             )
 
             execution_result = execute(payload)
@@ -1414,6 +1591,59 @@ def scanner_discover_refresh():
         "count": len(symbols),
         "discovery": DISCOVERY_STATE,
     }
+
+
+
+
+@app.post("/safety/emergency-stop")
+def safety_emergency_stop(reason: str = "manual emergency stop"):
+    SAFETY_STATE["emergency_stop"] = True
+    SAFETY_STATE["reason"] = reason
+    SAFETY_STATE["changed_at"] = now_iso()
+
+    # Stop scanner immediately too.
+    SCANNER_STATE["running"] = False
+    task = SCANNER_STATE.get("task")
+    if task:
+        task.cancel()
+    SCANNER_STATE["task"] = None
+
+    return {"ok": True, "emergency_stop": True, "reason": reason}
+
+
+@app.post("/safety/resume")
+def safety_resume():
+    SAFETY_STATE["emergency_stop"] = False
+    SAFETY_STATE["reason"] = None
+    SAFETY_STATE["changed_at"] = now_iso()
+    return {"ok": True, "emergency_stop": False}
+
+
+@app.get("/safety/status")
+def safety_status():
+    session_ok, session_reason = is_in_allowed_session()
+    return {
+        "emergency_stop": SAFETY_STATE.get("emergency_stop"),
+        "reason": SAFETY_STATE.get("reason"),
+        "changed_at": SAFETY_STATE.get("changed_at"),
+        "watchdog_enabled": WATCHDOG_ENABLED,
+        "scanner_auto_start": SCANNER_AUTO_START,
+        "session_filter_enabled": SESSION_FILTER_ENABLED,
+        "session_ok": session_ok,
+        "session_reason": session_reason,
+        "allowed_utc_ranges": SESSION_ALLOWED_UTC_RANGES,
+        "mtf_confirm_enabled": MTF_CONFIRM_ENABLED,
+        "mtf_interval": MTF_INTERVAL,
+        "auto_risk_enabled": AUTO_RISK_ENABLED,
+    }
+
+
+@app.get("/positions/history")
+def positions_history(limit: int = 100):
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute("SELECT * FROM positions ORDER BY created_at DESC LIMIT ?", (max(1, min(limit, 500)),)).fetchall()
+        return {"rows": [dict(r) for r in rows]}
 
 
 @app.post("/scanner/start")
@@ -1623,7 +1853,7 @@ def dashboard():
             <button onclick="startWs()">Start Futures WS</button>
             <button class="gray" onclick="stopWs()">Stop Futures WS</button>
             <button onclick="syncFutures()">Sync Futures</button>
-            <button onclick="startScanner()">Start Scanner</button><button class="gray" onclick="stopScanner()">Stop Scanner</button><button onclick="scanOnce()">Scan Once</button><button onclick="refreshDiscovery()">Refresh Symbols</button><button class="gray" onclick="refreshAll()">Refresh</button>
+            <button onclick="startScanner()">Start Scanner</button><button class="gray" onclick="stopScanner()">Stop Scanner</button><button class="danger" onclick="emergencyStop()">Emergency Stop</button><button onclick="resumeSafety()">Resume</button><button onclick="scanOnce()">Scan Once</button><button onclick="refreshDiscovery()">Refresh Symbols</button><button class="gray" onclick="refreshAll()">Refresh</button>
             <a href="/docs" target="_blank"><button class="gray">Open API Docs</button></a>
         </div>
         <div id="controlResult" class="small" style="margin-top:10px;"></div>
@@ -1667,6 +1897,10 @@ def dashboard():
         <div class="card">
             <h3>Scanner Status</h3>
             <pre id="scannerBox">Loading...</pre>
+        </div>
+        <div class="card">
+            <h3>Safety Status</h3>
+            <pre id="safetyBox">Loading...</pre>
         </div>
     </div>
 </div>
@@ -1837,8 +2071,41 @@ async function scanOnce() {
     }
 }
 
+
+async function loadSafety() {
+    try {
+        const data = await getJson("/safety/status");
+        const el = document.getElementById("safetyBox");
+        if (el) el.textContent = JSON.stringify(data, null, 2);
+    } catch (e) {
+        const el = document.getElementById("safetyBox");
+        if (el) el.textContent = "Safety unavailable: " + e.message;
+    }
+}
+
+async function emergencyStop() {
+    if (!confirm("Emergency stop scanner/trading?")) return;
+    try {
+        const data = await getJson("/safety/emergency-stop?reason=dashboard", {method:"POST"});
+        document.getElementById("controlResult").textContent = JSON.stringify(data);
+        setTimeout(refreshAll, 1000);
+    } catch(e) {
+        document.getElementById("controlResult").textContent = e.message;
+    }
+}
+
+async function resumeSafety() {
+    try {
+        const data = await getJson("/safety/resume", {method:"POST"});
+        document.getElementById("controlResult").textContent = JSON.stringify(data);
+        setTimeout(refreshAll, 1000);
+    } catch(e) {
+        document.getElementById("controlResult").textContent = e.message;
+    }
+}
+
 async function refreshAll() {
-    await Promise.allSettled([loadRoot(), loadConfig(), loadWs(), loadPositions(), loadJournal(), loadScanner()]);
+    await Promise.allSettled([loadRoot(), loadConfig(), loadWs(), loadPositions(), loadJournal(), loadScanner(), loadSafety()]);
 }
 
 refreshAll();
@@ -1850,9 +2117,22 @@ setInterval(refreshAll, 10000);
 
 
 
+
+
+@app.on_event("startup")
+async def startup_services():
+    if WATCHDOG_ENABLED and SAFETY_STATE.get("watchdog_task") is None:
+        SAFETY_STATE["watchdog_task"] = asyncio.create_task(_watchdog_loop())
+
+    if SCANNER_AUTO_START and not SAFETY_STATE.get("emergency_stop") and not SCANNER_STATE.get("running"):
+        SCANNER_STATE["running"] = True
+        SCANNER_STATE["last_error"] = None
+        SCANNER_STATE["task"] = asyncio.create_task(_scanner_loop())
+
+
 @app.get("/")
 def root():
-    return {"status": "ok", "service": "binance-spot-futures-bot-pro-final-auto-discovery", "time": now_iso()}
+    return {"status": "ok", "service": "binance-spot-futures-bot-pro-final-monster-v1", "time": now_iso()}
 
 
 @app.get("/config")
