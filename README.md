@@ -1,19 +1,18 @@
-# Binance Bot Analytics + Alerts V1
+# Binance Bot Command Center V1
 
-Adds:
-- analytics summary endpoint
-- equity curve data
-- session/hour performance
-- symbol performance
-- Discord/Telegram alert support
-- alert test endpoint
-- dashboard analytics detail panel
+A polished dashboard upgrade:
+- Mission control buttons
+- Live position PnL
+- Unrealized + realized PnL
+- Win rate bar
+- Equity curve canvas
+- Scanner watchlist
+- PRO engine detail
+- Manager / adaptive / safety / websocket status
+- Auto refresh every 5 seconds
 
-Endpoints:
-- GET /analytics/summary
-- GET /analytics/equity-curve
-- GET /analytics/session-performance
-- POST /alerts/test
+Open:
+https://YOUR-DOMAIN/dashboard
 
 Service:
-binance-spot-futures-bot-pro-final-analytics-alerts-v1
+binance-spot-futures-bot-pro-final-command-center-v1

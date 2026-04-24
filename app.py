@@ -41,12 +41,55 @@ BINANCE_FUTURES_MARGIN_TYPE = os.getenv("BINANCE_FUTURES_MARGIN_TYPE", "ISOLATED
 BINANCE_FUTURES_LEVERAGE = int(os.getenv("BINANCE_FUTURES_LEVERAGE", "3"))
 BINANCE_FUTURES_WS_PING_SECONDS = int(os.getenv("BINANCE_FUTURES_WS_PING_SECONDS", "30"))
 
-BE_TRIGGER_R = float(os.getenv("BE_TRIGGER_R", "1.0"))
+BE_TRIGGER_R = float(os.getenv("BE_TRIGGER_R", "0.50"))
 TRAIL_TRIGGER_R = float(os.getenv("TRAIL_TRIGGER_R", "1.8"))
 TRAIL_DISTANCE_R = float(os.getenv("TRAIL_DISTANCE_R", "0.8"))
 REVERSAL_SCORE_TO_EXIT = int(os.getenv("REVERSAL_SCORE_TO_EXIT", "3"))
 
 WS_STATE: Dict[str, Any] = {"task": None, "running": False, "last_event": None, "listen_key": None, "last_error": None}
+
+LIVE_MANAGER_ENABLED = os.getenv("LIVE_MANAGER_ENABLED", "true").lower() == "true"
+LIVE_MANAGER_AUTO_START = os.getenv("LIVE_MANAGER_AUTO_START", "true").lower() == "true"
+LIVE_MANAGER_SLEEP_SECONDS = int(os.getenv("LIVE_MANAGER_SLEEP_SECONDS", "10"))
+
+PA_TRAIL_ENABLED = os.getenv("PA_TRAIL_ENABLED", "true").lower() == "true"
+PA_TRAIL_BARS = int(os.getenv("PA_TRAIL_BARS", "3"))
+PA_TRAIL_INTERVAL = os.getenv("PA_TRAIL_INTERVAL", "5m")
+PA_TRAIL_ACTIVATE_R = float(os.getenv("PA_TRAIL_ACTIVATE_R", "0.75"))
+
+ADAPTIVE_ENABLED = os.getenv("ADAPTIVE_ENABLED", "true").lower() == "true"
+ADAPTIVE_LOOKBACK_TRADES = int(os.getenv("ADAPTIVE_LOOKBACK_TRADES", "20"))
+ADAPTIVE_MIN_TRADES = int(os.getenv("ADAPTIVE_MIN_TRADES", "6"))
+ADAPTIVE_MAX_LOSS_STREAK = int(os.getenv("ADAPTIVE_MAX_LOSS_STREAK", "3"))
+ADAPTIVE_MIN_WIN_RATE = float(os.getenv("ADAPTIVE_MIN_WIN_RATE", "35"))
+ADAPTIVE_PAUSE_MINUTES = int(os.getenv("ADAPTIVE_PAUSE_MINUTES", "30"))
+
+# PRO Engine: regime + liquidity + confirmation + cooldown + symbol quality
+PRO_ENGINE_ENABLED = os.getenv("PRO_ENGINE_ENABLED", "true").lower() == "true"
+PRO_REGIME_INTERVAL = os.getenv("PRO_REGIME_INTERVAL", "15m")
+PRO_REGIME_LIMIT = int(os.getenv("PRO_REGIME_LIMIT", "80"))
+PRO_BLOCK_CHOP = os.getenv("PRO_BLOCK_CHOP", "true").lower() == "true"
+PRO_CHOP_RANGE_MULT = float(os.getenv("PRO_CHOP_RANGE_MULT", "5.0"))
+PRO_ENTRY_BODY_MIN = float(os.getenv("PRO_ENTRY_BODY_MIN", "0.55"))
+PRO_ENTRY_CLOSE_TOP_BOTTOM = float(os.getenv("PRO_ENTRY_CLOSE_TOP_BOTTOM", "0.35"))
+
+PRO_MAX_TRADES_PER_HOUR = int(os.getenv("PRO_MAX_TRADES_PER_HOUR", "2"))
+PRO_SYMBOL_COOLDOWN_MINUTES = int(os.getenv("PRO_SYMBOL_COOLDOWN_MINUTES", "20"))
+PRO_LOSS_STREAK_PAUSE_MINUTES = int(os.getenv("PRO_LOSS_STREAK_PAUSE_MINUTES", "45"))
+PRO_MIN_24H_QUOTE_VOLUME = float(os.getenv("PRO_MIN_24H_QUOTE_VOLUME", "100000000"))
+PRO_ALLOWED_SYMBOLS = [s.strip().upper() for s in os.getenv("PRO_ALLOWED_SYMBOLS", "").split(",") if s.strip()]
+PRO_BLOCK_LOW_QUALITY_SYMBOLS = os.getenv("PRO_BLOCK_LOW_QUALITY_SYMBOLS", "true").lower() == "true"
+
+PRO_ENGINE_STATE: Dict[str, Any] = {
+    "last_checks": {},
+    "symbol_cooldowns": {},
+    "global_pause_until": None,
+    "last_error": None,
+}
+
+LIVE_MANAGER_STATE: Dict[str, Any] = {"task": None, "running": False, "last_run": None, "last_error": None, "last_actions": []}
+ADAPTIVE_STATE: Dict[str, Any] = {"mode": "normal", "last_eval": None, "reason": None, "paused_until": None, "recommendations": []}
+
 
 SCANNER_ENABLED_DEFAULT = os.getenv("SCANNER_ENABLED_DEFAULT", "false").lower() == "true"
 SCANNER_EXCHANGE = os.getenv("SCANNER_EXCHANGE", "paper")
@@ -751,6 +794,243 @@ def send_order_futures(payload: SignalPayload, plan: Dict[str, Any]):
     return {"submitted": ok, "exchange": "binance_futures", "position_id": pos_id, "client_order_id": cid, "response": resp["json"], "account_config": cfg, "reason": "ok" if ok else resp["text"]}
 
 
+
+def pro_get_24h_ticker(symbol: str):
+    r = public_get(BINANCE_FUTURES_BASE_URL, "/fapi/v1/ticker/24hr", {"symbol": symbol.upper()})
+    if r["status_code"] >= 400:
+        raise RuntimeError(r["text"])
+    return r["json"]
+
+
+def pro_symbol_quality(symbol: str):
+    symbol = symbol.upper()
+    try:
+        t = pro_get_24h_ticker(symbol)
+        quote_volume = float(t.get("quoteVolume", 0) or 0)
+        price_change_pct = abs(float(t.get("priceChangePercent", 0) or 0))
+        allow = True
+        reasons = []
+
+        if PRO_ALLOWED_SYMBOLS and symbol not in PRO_ALLOWED_SYMBOLS:
+            allow = False
+            reasons.append("not in PRO_ALLOWED_SYMBOLS")
+
+        if PRO_BLOCK_LOW_QUALITY_SYMBOLS and quote_volume < PRO_MIN_24H_QUOTE_VOLUME:
+            allow = False
+            reasons.append("low 24h volume")
+
+        return {
+            "allow": allow,
+            "symbol": symbol,
+            "quote_volume": quote_volume,
+            "price_change_pct": price_change_pct,
+            "reasons": reasons or ["symbol quality ok"],
+        }
+    except Exception as exc:
+        return {"allow": not PRO_BLOCK_LOW_QUALITY_SYMBOLS, "symbol": symbol, "error": str(exc), "reasons": ["symbol quality check failed"]}
+
+
+def pro_market_regime(symbol: str):
+    try:
+        candles = futures_klines(symbol, PRO_REGIME_INTERVAL, PRO_REGIME_LIMIT)
+        if len(candles) < 20:
+            return {"regime": "unknown", "allow": True, "reason": "not enough candles"}
+
+        recent = candles[-50:] if len(candles) >= 50 else candles
+        highs = [c["high"] for c in recent]
+        lows = [c["low"] for c in recent]
+        closes = [c["close"] for c in recent]
+
+        total_range = max(highs) - min(lows)
+        avg_candle = sum((c["high"] - c["low"]) for c in recent) / len(recent)
+        last_close = closes[-1]
+
+        breakout_up = last_close > max(highs[:-5]) if len(highs) > 10 else False
+        breakout_down = last_close < min(lows[:-5]) if len(lows) > 10 else False
+
+        # simple trend strength by slope
+        slope = closes[-1] - closes[-10] if len(closes) >= 10 else 0
+        slope_pct = (slope / closes[-10] * 100) if len(closes) >= 10 and closes[-10] else 0
+
+        chop = total_range < avg_candle * PRO_CHOP_RANGE_MULT if avg_candle > 0 else False
+
+        if breakout_up:
+            regime = "breakout_up"
+        elif breakout_down:
+            regime = "breakout_down"
+        elif chop:
+            regime = "chop"
+        elif slope_pct > 0.25:
+            regime = "trend_up"
+        elif slope_pct < -0.25:
+            regime = "trend_down"
+        else:
+            regime = "range"
+
+        allow = not (PRO_BLOCK_CHOP and regime in ["chop", "range"])
+        return {
+            "regime": regime,
+            "allow": allow,
+            "reason": "regime allowed" if allow else f"blocked by regime: {regime}",
+            "interval": PRO_REGIME_INTERVAL,
+            "range": total_range,
+            "avg_candle": avg_candle,
+            "slope_pct": slope_pct,
+            "breakout_up": breakout_up,
+            "breakout_down": breakout_down,
+        }
+    except Exception as exc:
+        return {"regime": "unknown", "allow": True, "reason": f"regime error ignored: {exc}"}
+
+
+def pro_entry_confirmation(symbol: str, signal: str):
+    try:
+        candles = futures_klines(symbol, SCANNER_INTERVAL, 5)
+        c = candles[-1]
+        body = abs(c["close"] - c["open"])
+        rng = max(c["high"] - c["low"], 0.00000001)
+        body_ratio = body / rng
+        close_position = (c["close"] - c["low"]) / rng
+
+        if signal in ["long", "buy"]:
+            strong_body = body_ratio >= PRO_ENTRY_BODY_MIN and c["close"] > c["open"]
+            closes_strong = close_position >= (1 - PRO_ENTRY_CLOSE_TOP_BOTTOM)
+            allow = strong_body and closes_strong
+            reason = "bull entry confirmed" if allow else "weak bull entry candle"
+        else:
+            strong_body = body_ratio >= PRO_ENTRY_BODY_MIN and c["close"] < c["open"]
+            closes_strong = close_position <= PRO_ENTRY_CLOSE_TOP_BOTTOM
+            allow = strong_body and closes_strong
+            reason = "bear entry confirmed" if allow else "weak bear entry candle"
+
+        return {
+            "allow": allow,
+            "reason": reason,
+            "body_ratio": body_ratio,
+            "close_position": close_position,
+            "candle": c,
+        }
+    except Exception as exc:
+        return {"allow": True, "reason": f"entry confirmation error ignored: {exc}"}
+
+
+def pro_recent_trades_for_symbol(symbol: Optional[str] = None, minutes: int = 60):
+    rows = analytics_trade_rows() if "analytics_trade_rows" in globals() else []
+    now_ts = datetime.now(timezone.utc).timestamp()
+    out = []
+    for r in rows:
+        try:
+            ts = datetime.fromisoformat((r.get("created_at") or "").replace("Z", "+00:00")).timestamp()
+        except Exception:
+            continue
+        if now_ts - ts <= minutes * 60:
+            if symbol is None or r.get("ticker") == symbol:
+                out.append(r)
+    return out
+
+
+def pro_cooldown_check(symbol: str):
+    now_ts = int(datetime.now(timezone.utc).timestamp())
+
+    pause_until = PRO_ENGINE_STATE.get("global_pause_until")
+    if pause_until and now_ts < pause_until:
+        return {"allow": False, "reason": f"global pause active until {pause_until}"}
+
+    sym_pause = PRO_ENGINE_STATE.get("symbol_cooldowns", {}).get(symbol)
+    if sym_pause and now_ts < sym_pause:
+        return {"allow": False, "reason": f"{symbol} cooldown active until {sym_pause}"}
+
+    recent_all = pro_recent_trades_for_symbol(None, 60)
+    if len(recent_all) >= PRO_MAX_TRADES_PER_HOUR:
+        return {"allow": False, "reason": "max trades per hour reached"}
+
+    recent_symbol = pro_recent_trades_for_symbol(symbol, PRO_SYMBOL_COOLDOWN_MINUTES)
+    if recent_symbol:
+        return {"allow": False, "reason": f"symbol cooldown: recent trade on {symbol}"}
+
+    return {"allow": True, "reason": "cooldown ok"}
+
+
+def pro_loss_streak_guard():
+    if "analytics_trade_rows" not in globals():
+        return {"allow": True, "reason": "no analytics available"}
+
+    rows = [r for r in analytics_trade_rows() if r.get("status") == "closed" and r.get("pnl") is not None]
+    streak = 0
+    for r in rows[:10]:
+        if r["pnl"] < 0:
+            streak += 1
+        else:
+            break
+
+    if streak >= ADAPTIVE_MAX_LOSS_STREAK:
+        until = int(datetime.now(timezone.utc).timestamp()) + PRO_LOSS_STREAK_PAUSE_MINUTES * 60
+        PRO_ENGINE_STATE["global_pause_until"] = until
+        return {"allow": False, "reason": f"loss streak guard active: {streak} losses", "pause_until": until}
+
+    return {"allow": True, "reason": "loss streak ok", "loss_streak": streak}
+
+
+def pro_engine_check(symbol: str, signal: str):
+    if not PRO_ENGINE_ENABLED:
+        return {"allow": True, "reason": "pro engine disabled"}
+
+    symbol = symbol.upper()
+    checks = {}
+
+    checks["loss_streak"] = pro_loss_streak_guard()
+    if not checks["loss_streak"].get("allow", True):
+        result = {"allow": False, "reason": checks["loss_streak"]["reason"], "checks": checks}
+        PRO_ENGINE_STATE["last_checks"][symbol] = result
+        return result
+
+    checks["cooldown"] = pro_cooldown_check(symbol)
+    if not checks["cooldown"].get("allow", True):
+        result = {"allow": False, "reason": checks["cooldown"]["reason"], "checks": checks}
+        PRO_ENGINE_STATE["last_checks"][symbol] = result
+        return result
+
+    checks["symbol_quality"] = pro_symbol_quality(symbol)
+    if not checks["symbol_quality"].get("allow", True):
+        result = {"allow": False, "reason": "symbol quality blocked", "checks": checks}
+        PRO_ENGINE_STATE["last_checks"][symbol] = result
+        return result
+
+    checks["regime"] = pro_market_regime(symbol)
+    if not checks["regime"].get("allow", True):
+        result = {"allow": False, "reason": checks["regime"]["reason"], "checks": checks}
+        PRO_ENGINE_STATE["last_checks"][symbol] = result
+        return result
+
+    # Regime direction alignment.
+    regime = checks["regime"].get("regime")
+    if signal in ["long", "buy"] and regime in ["breakout_down", "trend_down"]:
+        result = {"allow": False, "reason": f"long blocked by bearish regime: {regime}", "checks": checks}
+        PRO_ENGINE_STATE["last_checks"][symbol] = result
+        return result
+
+    if signal in ["short", "sell"] and regime in ["breakout_up", "trend_up"]:
+        result = {"allow": False, "reason": f"short blocked by bullish regime: {regime}", "checks": checks}
+        PRO_ENGINE_STATE["last_checks"][symbol] = result
+        return result
+
+    checks["entry_confirmation"] = pro_entry_confirmation(symbol, signal)
+    if not checks["entry_confirmation"].get("allow", True):
+        result = {"allow": False, "reason": checks["entry_confirmation"]["reason"], "checks": checks}
+        PRO_ENGINE_STATE["last_checks"][symbol] = result
+        return result
+
+    result = {"allow": True, "reason": "pro engine passed", "checks": checks}
+    PRO_ENGINE_STATE["last_checks"][symbol] = result
+    return result
+
+
+def pro_set_symbol_cooldown(symbol: str):
+    until = int(datetime.now(timezone.utc).timestamp()) + PRO_SYMBOL_COOLDOWN_MINUTES * 60
+    PRO_ENGINE_STATE.setdefault("symbol_cooldowns", {})[symbol.upper()] = until
+    return until
+
+
 def execute(payload: SignalPayload):
     if SAFETY_STATE.get("emergency_stop"):
         return {"approved": False, "reason": f"emergency stop active: {SAFETY_STATE.get('reason')}"}
@@ -764,6 +1044,10 @@ def execute(payload: SignalPayload):
 
     if get_open_positions_count() >= MAX_CONCURRENT_POSITIONS:
         return {"approved": False, "reason": "max concurrent positions reached"}
+
+    adaptive_ok, adaptive_reason = adaptive_allows_new_trade(payload.ticker)
+    if not adaptive_ok:
+        return {"approved": False, "reason": adaptive_reason, "adaptive": ADAPTIVE_STATE}
 
     if BOT_SECRET != "CHANGE_ME" and payload.secret != BOT_SECRET:
         raise HTTPException(status_code=401, detail="invalid secret")
@@ -823,6 +1107,12 @@ def execute(payload: SignalPayload):
         journal(payload, False, "blocked: bullish structure", response)
         return response
 
+    pro = pro_engine_check(payload.ticker, payload.signal)
+    if not pro.get("allow", True):
+        response = {"approved": False, "reason": pro.get("reason"), "pro_engine": pro, "ts": now_iso()}
+        journal(payload, False, pro.get("reason", "pro engine blocked"), response)
+        return response
+
     exchange = payload.exchange or DEFAULT_EXCHANGE
     plan = build_order_plan(payload)
 
@@ -836,10 +1126,11 @@ def execute(payload: SignalPayload):
         result = {"submitted": False, "reason": f"unsupported exchange: {exchange}"}
 
     approved = bool(result.get("submitted"))
-    response = {"approved": approved, "exchange": exchange, "structure": structure, "orderbook": orderbook, "setup_quality": setup_quality, "order_plan": plan, "result": result, "ts": now_iso()}
+    response = {"approved": approved, "exchange": exchange, "structure": structure, "orderbook": orderbook, "setup_quality": setup_quality, "order_plan": plan, "result": result, "pro_engine": pro if "pro" in locals() else None, "ts": now_iso()}
     journal(payload, approved, result.get("reason", ""), response)
 
     if approved:
+        pro_set_symbol_cooldown(payload.ticker)
         notify_user(
             "Trade opened",
             f"{payload.signal.upper()} {payload.ticker} on {exchange}",
@@ -1113,7 +1404,7 @@ async def _futures_ws_loop():
 
                     if event_type == "ORDER_TRADE_UPDATE":
                         result = handle_futures_order_trade_update(data)
-                        WS_STATE["last_event"] = {"type": event_type, "result": result, "ts": now_iso()}
+                        WS_STATE["last_event"] = {"type": event_type, "result": result, "pro_engine": pro if "pro" in locals() else None, "ts": now_iso()}
                     else:
                         WS_STATE["last_event"] = {"type": event_type, "data": data, "ts": now_iso()}
 
@@ -1554,6 +1845,12 @@ def run_scanner_once():
                 analysis["execution"] = {"approved": False, "reason": "scanner cooldown active"}
                 continue
 
+            pro = pro_engine_check(symbol, signal)
+            analysis["pro_engine"] = pro
+            if not pro.get("allow", True):
+                analysis["execution"] = {"approved": False, "reason": pro.get("reason"), "pro_engine": pro}
+                continue
+
             payload = SignalPayload(
                 signal=signal,
                 ticker=symbol,
@@ -1654,6 +1951,16 @@ def safety_status():
         "mtf_interval": MTF_INTERVAL,
         "auto_risk_enabled": AUTO_RISK_ENABLED,
         "alerts_enabled": ALERTS_ENABLED,
+        "live_manager_enabled": LIVE_MANAGER_ENABLED,
+        "live_manager_auto_start": LIVE_MANAGER_AUTO_START,
+        "pa_trail_enabled": PA_TRAIL_ENABLED,
+        "pa_trail_bars": PA_TRAIL_BARS,
+        "pa_trail_activate_r": PA_TRAIL_ACTIVATE_R,
+        "adaptive_enabled": ADAPTIVE_ENABLED,
+        "pro_engine_enabled": PRO_ENGINE_ENABLED,
+        "pro_block_chop": PRO_BLOCK_CHOP,
+        "pro_max_trades_per_hour": PRO_MAX_TRADES_PER_HOUR,
+        "pro_min_24h_quote_volume": PRO_MIN_24H_QUOTE_VOLUME,
     }
 
 
@@ -1970,6 +2277,144 @@ def dashboard_stats_data():
 
 
 
+
+def current_market_price_for_position(position: Dict[str, Any]):
+    if position["exchange"] == "paper":
+        return float(position["entry_price"])
+    if position["exchange"] == "binance_spot":
+        data = public_get(BINANCE_SPOT_BASE_URL, "/api/v3/ticker/price", {"symbol": position["ticker"]})
+        if data["status_code"] >= 400:
+            raise RuntimeError(data["text"])
+        return float(data["json"]["price"])
+    if position["exchange"] == "binance_futures":
+        data = public_get(BINANCE_FUTURES_BASE_URL, "/fapi/v1/ticker/price", {"symbol": position["ticker"]})
+        if data["status_code"] >= 400:
+            raise RuntimeError(data["text"])
+        return float(data["json"]["price"])
+    raise RuntimeError("unsupported exchange")
+
+
+def position_unrealized_pnl(position: Dict[str, Any], mark_price: float):
+    entry = float(position.get("entry_price") or 0)
+    qty = float(position.get("qty") or 0)
+    return (mark_price - entry) * qty if position.get("signal") in ["long", "buy"] else (entry - mark_price) * qty
+
+
+def r_multiple(position: Dict[str, Any], mark_price: float):
+    entry = float(position.get("entry_price") or 0)
+    stop = float(position.get("stop_price") or entry)
+    risk = abs(entry - stop) or max(entry * 0.001, 0.000001)
+    pnl_per_unit = mark_price - entry if position.get("signal") in ["long", "buy"] else entry - mark_price
+    return pnl_per_unit / risk
+
+
+def recent_price_action_trail(symbol: str, is_long: bool):
+    if not PA_TRAIL_ENABLED:
+        return None
+    candles = futures_klines(symbol, PA_TRAIL_INTERVAL, max(PA_TRAIL_BARS + 3, 10))
+    closed = candles[:-1] if len(candles) > PA_TRAIL_BARS else candles
+    recent = closed[-PA_TRAIL_BARS:]
+    if not recent:
+        return None
+    return min(c["low"] for c in recent) if is_long else max(c["high"] for c in recent)
+
+
+def apply_price_action_trailing(position: Dict[str, Any], mark_price: float):
+    if position.get("exchange") != "binance_futures":
+        return {"applied": False, "reason": "futures only"}
+    current_r = r_multiple(position, mark_price)
+    if current_r < PA_TRAIL_ACTIVATE_R:
+        return {"applied": False, "reason": "not activated", "current_r": current_r}
+    is_long = position.get("signal") in ["long", "buy"]
+    trail = recent_price_action_trail(position["ticker"], is_long)
+    if trail is None:
+        return {"applied": False, "reason": "no trail"}
+    old_stop = float(position.get("stop_price") or 0)
+    if is_long and trail > old_stop and trail < mark_price:
+        update_position(position["id"], {"stop_price": trail})
+        return {"applied": True, "new_stop": trail, "old_stop": old_stop, "current_r": current_r}
+    if (not is_long) and (old_stop <= 0 or (trail < old_stop and trail > mark_price)):
+        update_position(position["id"], {"stop_price": trail})
+        return {"applied": True, "new_stop": trail, "old_stop": old_stop, "current_r": current_r}
+    return {"applied": False, "reason": "trail not better", "trail": trail, "old_stop": old_stop, "current_r": current_r}
+
+
+def adaptive_recent_closed_rows():
+    if "analytics_trade_rows" not in globals():
+        return []
+    closed = [r for r in analytics_trade_rows() if r.get("status") == "closed" and r.get("pnl") is not None]
+    return closed[:ADAPTIVE_LOOKBACK_TRADES]
+
+
+def evaluate_adaptive_optimizer():
+    if not ADAPTIVE_ENABLED:
+        ADAPTIVE_STATE.update({"mode": "disabled", "reason": "adaptive disabled", "last_eval": now_iso()})
+        return ADAPTIVE_STATE
+    now_ts = int(datetime.now(timezone.utc).timestamp())
+    paused_until = ADAPTIVE_STATE.get("paused_until")
+    if paused_until and now_ts < paused_until:
+        ADAPTIVE_STATE.update({"mode": "cooldown", "last_eval": now_iso()})
+        return ADAPTIVE_STATE
+    rows = adaptive_recent_closed_rows()
+    if len(rows) < ADAPTIVE_MIN_TRADES:
+        ADAPTIVE_STATE.update({"mode": "learning", "reason": f"need {ADAPTIVE_MIN_TRADES} closed trades", "last_eval": now_iso(), "recommendations": ["Keep paper mode running to collect more data."]})
+        return ADAPTIVE_STATE
+    wins = len([r for r in rows if r["pnl"] > 0])
+    losses = len([r for r in rows if r["pnl"] < 0])
+    total = wins + losses
+    win_rate = wins / total * 100 if total else 0
+    streak = 0
+    for r in rows:
+        if r["pnl"] < 0:
+            streak += 1
+        else:
+            break
+    mode = "normal"
+    reason = "performance acceptable"
+    recs = []
+    if streak >= ADAPTIVE_MAX_LOSS_STREAK or win_rate < ADAPTIVE_MIN_WIN_RATE:
+        mode = "defensive"
+        reason = f"bad performance: win_rate={win_rate:.1f}%, loss_streak={streak}"
+        ADAPTIVE_STATE["paused_until"] = now_ts + ADAPTIVE_PAUSE_MINUTES * 60
+        recs = ["Pause entries temporarily.", "Increase SCANNER_MIN_QUALITY.", "Enable MTF_CONFIRM_ENABLED.", "Review best/worst symbols and hours."]
+    ADAPTIVE_STATE.update({"mode": mode, "reason": reason, "last_eval": now_iso(), "win_rate": win_rate, "loss_streak": streak, "sample_size": len(rows), "recommendations": recs})
+    return ADAPTIVE_STATE
+
+
+def adaptive_allows_new_trade(symbol: str):
+    state = evaluate_adaptive_optimizer()
+    now_ts = int(datetime.now(timezone.utc).timestamp())
+    if state.get("paused_until") and now_ts < state["paused_until"]:
+        return False, f"adaptive pause active until {state['paused_until']}"
+    return True, "adaptive ok"
+
+
+async def _live_manager_loop():
+    while LIVE_MANAGER_ENABLED:
+        try:
+            actions = []
+            with sqlite3.connect(DB_PATH) as conn:
+                conn.row_factory = sqlite3.Row
+                positions = [dict(r) for r in conn.execute("SELECT * FROM positions WHERE status='open' ORDER BY created_at DESC").fetchall()]
+            for p in positions:
+                try:
+                    mark = current_market_price_for_position(p)
+                    pa = apply_price_action_trailing(p, mark)
+                    p2 = get_position(p["id"]) or p
+                    payload = ManagePositionPayload(position_id=p["id"], current_price=mark, dry_run=False)
+                    managed = manage_position(p2, mark, payload)
+                    actions.append({"position_id": p["id"], "ticker": p["ticker"], "mark_price": mark, "unrealized_pnl": position_unrealized_pnl(p, mark), "current_r": r_multiple(p, mark), "pa_trailing": pa, "managed_actions": managed.get("actions") if isinstance(managed, dict) else None})
+                except Exception as exc:
+                    actions.append({"position_id": p.get("id"), "ticker": p.get("ticker"), "error": str(exc)})
+            LIVE_MANAGER_STATE["last_run"] = now_iso()
+            LIVE_MANAGER_STATE["last_actions"] = actions[:50]
+            LIVE_MANAGER_STATE["last_error"] = None
+            evaluate_adaptive_optimizer()
+        except Exception as exc:
+            LIVE_MANAGER_STATE["last_error"] = str(exc)
+        await asyncio.sleep(LIVE_MANAGER_SLEEP_SECONDS)
+
+
 @app.get("/analytics/summary")
 def analytics_summary():
     return analytics_summary_data()
@@ -1991,216 +2436,296 @@ def alerts_test():
     return notify_user("Bot alert test", "Your bot alerts are working.", {"time": now_iso()})
 
 
+
+@app.get("/positions/live")
+def positions_live():
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        positions = [dict(r) for r in conn.execute("SELECT * FROM positions WHERE status='open' ORDER BY created_at DESC").fetchall()]
+    rows = []
+    for p in positions:
+        try:
+            mark = current_market_price_for_position(p)
+            rows.append({**p, "mark_price": mark, "unrealized_pnl": position_unrealized_pnl(p, mark), "current_r": r_multiple(p, mark)})
+        except Exception as exc:
+            rows.append({**p, "live_error": str(exc)})
+    return {"rows": rows, "manager": LIVE_MANAGER_STATE}
+
+
+@app.get("/manager/status")
+def manager_status():
+    return {"enabled": LIVE_MANAGER_ENABLED, "auto_start": LIVE_MANAGER_AUTO_START, "running": LIVE_MANAGER_STATE.get("running"), "sleep_seconds": LIVE_MANAGER_SLEEP_SECONDS, "pa_trailing_enabled": PA_TRAIL_ENABLED, "pa_trail_bars": PA_TRAIL_BARS, "pa_trail_interval": PA_TRAIL_INTERVAL, "pa_trail_activate_r": PA_TRAIL_ACTIVATE_R, "last_run": LIVE_MANAGER_STATE.get("last_run"), "last_error": LIVE_MANAGER_STATE.get("last_error"), "last_actions": LIVE_MANAGER_STATE.get("last_actions", [])}
+
+
+@app.post("/manager/start")
+async def manager_start():
+    if LIVE_MANAGER_STATE.get("running"):
+        return {"ok": True, "reason": "manager already running"}
+    LIVE_MANAGER_STATE["running"] = True
+    LIVE_MANAGER_STATE["task"] = asyncio.create_task(_live_manager_loop())
+    return {"ok": True, "reason": "manager started"}
+
+
+@app.post("/manager/stop")
+async def manager_stop():
+    LIVE_MANAGER_STATE["running"] = False
+    task = LIVE_MANAGER_STATE.get("task")
+    if task:
+        task.cancel()
+    LIVE_MANAGER_STATE["task"] = None
+    return {"ok": True, "reason": "manager stopped"}
+
+
+@app.get("/adaptive/status")
+def adaptive_status():
+    return evaluate_adaptive_optimizer()
+
+
+
+@app.get("/pro-engine/status")
+def pro_engine_status():
+    return {
+        "enabled": PRO_ENGINE_ENABLED,
+        "block_chop": PRO_BLOCK_CHOP,
+        "regime_interval": PRO_REGIME_INTERVAL,
+        "entry_body_min": PRO_ENTRY_BODY_MIN,
+        "max_trades_per_hour": PRO_MAX_TRADES_PER_HOUR,
+        "symbol_cooldown_minutes": PRO_SYMBOL_COOLDOWN_MINUTES,
+        "min_24h_quote_volume": PRO_MIN_24H_QUOTE_VOLUME,
+        "allowed_symbols": PRO_ALLOWED_SYMBOLS,
+        "state": PRO_ENGINE_STATE,
+    }
+
+
+@app.post("/pro-engine/reset")
+def pro_engine_reset():
+    PRO_ENGINE_STATE["symbol_cooldowns"] = {}
+    PRO_ENGINE_STATE["global_pause_until"] = None
+    PRO_ENGINE_STATE["last_checks"] = {}
+    return {"ok": True, "reason": "pro engine state reset"}
+
+
+@app.get("/pro-engine/check/{symbol}/{signal}")
+def pro_engine_manual_check(symbol: str, signal: str):
+    return pro_engine_check(symbol.upper(), signal.lower())
+
+
+
 @app.get("/dashboard", response_class=HTMLResponse)
 def dashboard():
     return """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Monster Bot Dashboard</title>
+    <title>Monster Bot Command Center</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
         :root {
-            --bg: #070b12;
-            --panel: #101827;
-            --panel2: #0d1422;
-            --line: #243044;
-            --text: #e5e7eb;
-            --muted: #94a3b8;
-            --green: #22c55e;
-            --red: #ef4444;
-            --yellow: #facc15;
-            --blue: #38bdf8;
-            --purple: #a78bfa;
-            --orange: #fb923c;
+            --bg0:#050712; --bg1:#080d19; --card:#0f172a; --card2:#111c31;
+            --line:#243145; --text:#e5e7eb; --muted:#94a3b8;
+            --green:#22c55e; --red:#ef4444; --yellow:#eab308; --blue:#38bdf8;
+            --purple:#a78bfa; --orange:#fb923c; --cyan:#22d3ee;
         }
-        * { box-sizing: border-box; }
+        * { box-sizing:border-box; }
         body {
-            margin: 0;
-            background: radial-gradient(circle at top left, #12213a, var(--bg) 38%);
-            color: var(--text);
+            margin:0; color:var(--text);
             font-family: Inter, Segoe UI, Arial, sans-serif;
+            background:
+                radial-gradient(circle at 10% 0%, rgba(56,189,248,.22), transparent 28%),
+                radial-gradient(circle at 85% 10%, rgba(167,139,250,.20), transparent 30%),
+                linear-gradient(180deg,var(--bg0),var(--bg1));
+            min-height:100vh;
         }
         header {
-            padding: 22px 28px;
-            border-bottom: 1px solid var(--line);
-            background: rgba(16,24,39,0.82);
-            backdrop-filter: blur(10px);
-            position: sticky;
-            top: 0;
-            z-index: 10;
+            padding:18px 24px; border-bottom:1px solid rgba(148,163,184,.18);
+            background:rgba(5,7,18,.72); backdrop-filter:blur(18px);
+            position:sticky; top:0; z-index:20;
         }
-        h1 { margin: 0; font-size: 24px; letter-spacing: .2px; }
-        .subtitle { color: var(--muted); margin-top: 5px; font-size: 13px; }
-        .wrap { max-width: 1500px; margin: auto; padding: 20px; }
-        .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 14px; }
-        .grid2 { display: grid; grid-template-columns: 1.2fr .8fr; gap: 14px; margin-top: 14px; }
-        @media (max-width: 950px) { .grid2 { grid-template-columns: 1fr; } }
+        .topbar { display:flex; align-items:center; justify-content:space-between; gap:16px; flex-wrap:wrap; }
+        h1 { margin:0; font-size:24px; letter-spacing:.2px; }
+        .sub { color:var(--muted); font-size:12px; margin-top:4px; }
+        .badge { padding:8px 11px; border-radius:999px; border:1px solid var(--line); background:rgba(15,23,42,.8); font-size:12px; color:#cbd5e1; }
+        .wrap { max-width:1600px; margin:auto; padding:18px; }
+        .hero {
+            display:grid; grid-template-columns: 1.3fr .7fr; gap:14px; margin-bottom:14px;
+        }
+        @media(max-width:1000px){ .hero{ grid-template-columns:1fr; } }
+        .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(210px,1fr)); gap:14px; }
+        .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:14px; margin-top:14px; }
+        .grid3 { display:grid; grid-template-columns:1.1fr .9fr .9fr; gap:14px; margin-top:14px; }
+        @media(max-width:1100px){ .grid2,.grid3{ grid-template-columns:1fr; } }
         .card {
-            background: linear-gradient(180deg, rgba(16,24,39,.98), rgba(13,20,34,.98));
-            border: 1px solid var(--line);
-            border-radius: 18px;
-            padding: 16px;
-            box-shadow: 0 18px 40px rgba(0,0,0,.25);
+            background:linear-gradient(180deg,rgba(15,23,42,.94),rgba(13,20,34,.94));
+            border:1px solid rgba(148,163,184,.16);
+            border-radius:20px; padding:16px;
+            box-shadow:0 18px 55px rgba(0,0,0,.32);
         }
-        .card h3 { margin: 0 0 10px; color: var(--muted); font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: .08em; }
-        .big { font-size: 28px; font-weight: 800; }
-        .small { font-size: 12px; color: var(--muted); margin-top: 5px; }
-        .green { color: var(--green); }
-        .red { color: var(--red); }
-        .yellow { color: var(--yellow); }
-        .blue { color: var(--blue); }
-        .purple { color: var(--purple); }
-        .orange { color: var(--orange); }
+        .card h3 {
+            margin:0 0 10px; color:var(--muted); font-size:12px; font-weight:800;
+            text-transform:uppercase; letter-spacing:.10em;
+        }
+        .big { font-size:30px; font-weight:900; line-height:1; }
+        .small { color:var(--muted); font-size:12px; margin-top:6px; }
+        .green{color:var(--green)} .red{color:var(--red)} .yellow{color:var(--yellow)}
+        .blue{color:var(--blue)} .purple{color:var(--purple)} .orange{color:var(--orange)}
+        .kpi {
+            min-height:116px; position:relative; overflow:hidden;
+        }
+        .kpi:after {
+            content:""; position:absolute; right:-35px; top:-35px; width:105px; height:105px;
+            background:rgba(56,189,248,.08); border-radius:999px;
+        }
         button {
-            border: 0;
-            border-radius: 12px;
-            padding: 10px 13px;
-            margin: 4px;
-            background: #2563eb;
-            color: white;
-            cursor: pointer;
-            font-weight: 700;
+            border:0; border-radius:13px; padding:10px 13px; margin:4px;
+            background:#2563eb; color:white; cursor:pointer; font-weight:800;
+            box-shadow:0 10px 25px rgba(37,99,235,.18);
         }
-        button:hover { filter: brightness(1.15); }
-        button.gray { background: #334155; }
-        button.danger { background: #dc2626; }
-        button.greenbtn { background: #16a34a; }
-        table { width: 100%; border-collapse: collapse; }
-        th, td { padding: 10px; border-bottom: 1px solid var(--line); font-size: 13px; text-align: left; vertical-align: top; }
-        th { color: var(--muted); background: rgba(15,23,42,.7); position: sticky; top: 0; }
-        tbody tr:hover { background: rgba(56,189,248,.05); }
-        .scroll { overflow: auto; max-height: 430px; border-radius: 12px; border: 1px solid var(--line); }
-        .pill { display: inline-flex; align-items:center; padding: 4px 8px; border-radius: 999px; font-size: 12px; font-weight: 800; }
-        .pill.long, .pill.win, .pill.buy { color: var(--green); background: rgba(34,197,94,.15); }
-        .pill.short, .pill.loss, .pill.sell { color: var(--red); background: rgba(239,68,68,.15); }
-        .pill.neutral { color: var(--yellow); background: rgba(250,204,21,.13); }
-        .pill.open { color: var(--blue); background: rgba(56,189,248,.15); }
-        .pill.closed { color: var(--muted); background: rgba(148,163,184,.15); }
-        pre { background: #020617; color: #cbd5e1; border: 1px solid var(--line); padding: 12px; border-radius: 14px; overflow:auto; max-height: 360px; font-size: 12px; }
+        button:hover { filter:brightness(1.15); transform:translateY(-1px); }
+        button.gray { background:#334155; box-shadow:none; }
+        button.danger { background:#dc2626; }
+        button.good { background:#16a34a; }
+        button.warn { background:#ca8a04; }
         .controls { display:flex; flex-wrap:wrap; gap:6px; }
-        .barWrap { height: 8px; background:#1e293b; border-radius:99px; overflow:hidden; margin-top:8px; }
-        .bar { height:100%; background: linear-gradient(90deg, var(--red), var(--yellow), var(--green)); width:0%; }
-        .sectionTitle { margin: 20px 0 10px; font-size: 16px; color:#cbd5e1; font-weight:800; }
-        a { color: var(--blue); }
+        .pill {
+            display:inline-flex; align-items:center; gap:5px; padding:5px 9px; border-radius:999px;
+            font-size:12px; font-weight:900; border:1px solid transparent;
+        }
+        .pill.long,.pill.win,.pill.buy,.pill.open { color:var(--green); background:rgba(34,197,94,.13); border-color:rgba(34,197,94,.22);}
+        .pill.short,.pill.loss,.pill.sell,.pill.stop { color:var(--red); background:rgba(239,68,68,.13); border-color:rgba(239,68,68,.22);}
+        .pill.watch,.pill.neutral { color:var(--yellow); background:rgba(234,179,8,.12); border-color:rgba(234,179,8,.22);}
+        .pill.info { color:var(--blue); background:rgba(56,189,248,.12); border-color:rgba(56,189,248,.20);}
+        .scroll { overflow:auto; max-height:420px; border:1px solid rgba(148,163,184,.13); border-radius:14px; }
+        table { width:100%; border-collapse:collapse; }
+        th,td { padding:10px; border-bottom:1px solid rgba(148,163,184,.12); font-size:12px; text-align:left; vertical-align:top; white-space:nowrap; }
+        th { color:var(--muted); background:rgba(2,6,23,.55); position:sticky; top:0; z-index:1; }
+        tr:hover { background:rgba(56,189,248,.05); }
+        .section { margin:18px 0 10px; font-size:15px; font-weight:900; color:#dbeafe; }
+        pre {
+            margin:0; background:#020617; color:#cbd5e1; border:1px solid rgba(148,163,184,.14);
+            padding:12px; border-radius:14px; overflow:auto; max-height:380px; font-size:11px;
+        }
+        canvas { width:100%; height:220px; background:rgba(2,6,23,.28); border-radius:15px; border:1px solid rgba(148,163,184,.12); }
+        .health {
+            display:flex; align-items:center; gap:10px; margin-top:12px;
+        }
+        .dot { width:10px; height:10px; border-radius:50%; background:var(--yellow); box-shadow:0 0 18px currentColor; }
+        .dot.green { background:var(--green); color:var(--green); }
+        .dot.red { background:var(--red); color:var(--red); }
+        .meter { height:8px; background:#1e293b; border-radius:99px; overflow:hidden; margin-top:10px; }
+        .meter > div { height:100%; background:linear-gradient(90deg,var(--red),var(--yellow),var(--green)); width:0%; }
+        a { color:var(--blue); text-decoration:none; }
+        .two { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+        @media(max-width:700px){ .two{grid-template-columns:1fr;} }
     </style>
 </head>
 <body>
 <header>
-    <h1>Monster Bot Dashboard</h1>
-    <div class="subtitle">Auto Discovery • Scanner • Structure • Orderbook • BOS/Sweep • Continuation • PnL</div>
+    <div class="topbar">
+        <div>
+            <h1>Monster Bot Command Center</h1>
+            <div class="sub">Live Manager • PRO Engine • Scanner • PnL • Watchlist • Safety</div>
+        </div>
+        <div>
+            <span class="badge" id="serviceBadge">Loading service...</span>
+            <span class="badge" id="clockBadge"></span>
+        </div>
+    </div>
 </header>
 
 <div class="wrap">
+    <div class="hero">
+        <div class="card">
+            <h3>Mission Control</h3>
+            <div class="controls">
+                <button class="good" onclick="startScanner()">Start Scanner</button>
+                <button class="gray" onclick="stopScanner()">Stop Scanner</button>
+                <button onclick="scanOnce()">Scan Once</button>
+                <button onclick="refreshDiscovery()">Refresh Symbols</button>
+                <button onclick="startManager()">Start Manager</button>
+                <button class="gray" onclick="stopManager()">Stop Manager</button>
+                <button onclick="startWs()">Start Futures WS</button>
+                <button class="gray" onclick="stopWs()">Stop Futures WS</button>
+                <button onclick="syncFutures()">Sync Futures</button>
+                <button class="warn" onclick="resetPro()">Reset PRO Engine</button>
+                <button class="danger" onclick="emergencyStop()">Emergency Stop</button>
+                <button class="good" onclick="resumeSafety()">Resume</button>
+                <button class="gray" onclick="refreshAll()">Refresh</button>
+                <a href="/docs" target="_blank"><button class="gray">API Docs</button></a>
+            </div>
+            <div class="health">
+                <span id="healthDot" class="dot"></span>
+                <span id="healthText" class="small">Checking system health...</span>
+            </div>
+            <div id="controlResult" class="small"></div>
+        </div>
+        <div class="card">
+            <h3>Recommended Fast Trail Settings</h3>
+            <div class="two">
+                <div><span class="pill info">BE 0.50R</span><div class="small">Fast break-even protection</div></div>
+                <div><span class="pill info">Trail 3 bars</span><div class="small">TP follows price action</div></div>
+                <div><span class="pill info">Manager 10s</span><div class="small">Faster live checks</div></div>
+                <div><span class="pill info">PRO filter</span><div class="small">Blocks chop / low quality</div></div>
+            </div>
+        </div>
+    </div>
+
     <div class="grid">
-        <div class="card">
-            <h3>Server</h3>
-            <div id="serverStatus" class="big yellow">Loading</div>
-            <div id="serviceName" class="small"></div>
-        </div>
-        <div class="card">
-            <h3>Execution</h3>
-            <div id="executionStatus" class="big yellow">Loading</div>
-            <div id="riskLine" class="small"></div>
-        </div>
-        <div class="card">
-            <h3>Scanner</h3>
-            <div id="scannerStatus" class="big yellow">Loading</div>
-            <div id="scannerLine" class="small"></div>
-        </div>
-        <div class="card">
-            <h3>Safety</h3>
-            <div id="safetyStatus" class="big yellow">Loading</div>
-            <div id="safetyLine" class="small"></div>
-        </div>
+        <div class="card kpi"><h3>Server</h3><div id="serverStatus" class="big yellow">...</div><div id="serverLine" class="small"></div></div>
+        <div class="card kpi"><h3>Execution</h3><div id="executionStatus" class="big yellow">...</div><div id="riskLine" class="small"></div></div>
+        <div class="card kpi"><h3>Scanner</h3><div id="scannerStatus" class="big yellow">...</div><div id="scannerLine" class="small"></div></div>
+        <div class="card kpi"><h3>Live Manager</h3><div id="managerStatus" class="big yellow">...</div><div id="managerLine" class="small"></div></div>
+        <div class="card kpi"><h3>Safety</h3><div id="safetyStatus" class="big yellow">...</div><div id="safetyLine" class="small"></div></div>
     </div>
 
     <div class="grid" style="margin-top:14px;">
-        <div class="card">
-            <h3>Open Positions</h3>
-            <div id="openCount" class="big blue">0</div>
-            <div class="small">Currently tracked open trades</div>
-        </div>
-        <div class="card">
-            <h3>Realized PnL</h3>
-            <div id="realizedPnl" class="big yellow">$0.00</div>
-            <div class="small">Estimated from bot close fills</div>
-        </div>
-        <div class="card">
-            <h3>Win Rate</h3>
-            <div id="winRate" class="big purple">0%</div>
-            <div class="barWrap"><div id="winBar" class="bar"></div></div>
-            <div id="wlLine" class="small"></div>
-        </div>
-        <div class="card">
-            <h3>Watchlist Setups</h3>
-            <div id="watchCount" class="big orange">0</div>
-            <div class="small">Scanner interested / near-valid setups</div>
-        </div>
+        <div class="card kpi"><h3>Open Positions</h3><div id="openCount" class="big blue">0</div><div class="small">Live tracked trades</div></div>
+        <div class="card kpi"><h3>Unrealized PnL</h3><div id="unrealizedPnl" class="big yellow">$0.00</div><div class="small">Live estimate</div></div>
+        <div class="card kpi"><h3>Realized PnL</h3><div id="realizedPnl" class="big yellow">$0.00</div><div class="small">Closed trades estimate</div></div>
+        <div class="card kpi"><h3>Win Rate</h3><div id="winRate" class="big purple">0%</div><div class="meter"><div id="winBar"></div></div><div id="wlLine" class="small"></div></div>
+        <div class="card kpi"><h3>Watchlist</h3><div id="watchCount" class="big orange">0</div><div class="small">Interesting scanner setups</div></div>
     </div>
 
-    <div class="card" style="margin-top:14px;">
-        <h3>Controls</h3>
-        <div class="controls">
-            <button class="greenbtn" onclick="startScanner()">Start Scanner</button>
-            <button class="gray" onclick="stopScanner()">Stop Scanner</button>
-            <button onclick="scanOnce()">Scan Once</button>
-            <button onclick="refreshDiscovery()">Refresh Symbols</button>
-            <button onclick="startWs()">Start Futures WS</button>
-            <button class="gray" onclick="stopWs()">Stop Futures WS</button>
-            <button onclick="syncFutures()">Sync Futures</button>
-            <button class="danger" onclick="emergencyStop()">Emergency Stop</button>
-            <button onclick="resumeSafety()">Resume</button>
-            <button class="gray" onclick="refreshAll()">Refresh</button>
-            <a href="/docs" target="_blank"><button class="gray">API Docs</button></a>
+    <div class="grid2">
+        <div class="card">
+            <h3>Equity Curve</h3>
+            <canvas id="equityCanvas" width="900" height="260"></canvas>
         </div>
-        <div id="controlResult" class="small"></div>
-    </div>
-
-    <div class="sectionTitle">Open Positions</div>
-    <div class="card">
-        <div class="scroll">
-            <table>
-                <thead><tr><th>Status</th><th>Symbol</th><th>Side</th><th>Exchange</th><th>Entry</th><th>Stop</th><th>Qty</th><th>Risk</th><th>BE</th><th>Trail</th><th>Action</th></tr></thead>
-                <tbody id="positionsBody"><tr><td colspan="11">Loading...</td></tr></tbody>
-            </table>
+        <div class="card">
+            <h3>Open Positions Live</h3>
+            <div class="scroll">
+                <table>
+                    <thead><tr><th>Status</th><th>Symbol</th><th>Side</th><th>Entry</th><th>Mark</th><th>Stop</th><th>PnL</th><th>R</th><th>Qty</th><th>Action</th></tr></thead>
+                    <tbody id="positionsBody"><tr><td colspan="10">Loading...</td></tr></tbody>
+                </table>
+            </div>
         </div>
     </div>
 
     <div class="grid2">
-        <div>
-            <div class="sectionTitle">Scanner Watchlist / Interested Setups</div>
-            <div class="card">
-                <div class="scroll">
-                    <table>
-                        <thead><tr><th>Symbol</th><th>Signal</th><th>Structure</th><th>Quality</th><th>Orderbook</th><th>Reason</th></tr></thead>
-                        <tbody id="watchBody"><tr><td colspan="6">Loading...</td></tr></tbody>
-                    </table>
-                </div>
+        <div class="card">
+            <h3>Scanner Watchlist / Near Setups</h3>
+            <div class="scroll">
+                <table>
+                    <thead><tr><th>Symbol</th><th>Signal</th><th>Structure</th><th>Quality</th><th>Orderbook</th><th>Reason</th></tr></thead>
+                    <tbody id="watchBody"><tr><td colspan="6">Loading...</td></tr></tbody>
+                </table>
             </div>
         </div>
-        <div>
-            <div class="sectionTitle">Scanner Status</div>
-            <div class="card"><pre id="scannerBox">Loading...</pre></div>
+        <div class="card">
+            <h3>Closed Trades / PnL</h3>
+            <div class="scroll">
+                <table>
+                    <thead><tr><th>Symbol</th><th>Side</th><th>Entry</th><th>Exit</th><th>Qty</th><th>PnL</th><th>Time</th></tr></thead>
+                    <tbody id="pnlBody"><tr><td colspan="7">Loading...</td></tr></tbody>
+                </table>
+            </div>
         </div>
     </div>
 
-    <div class="grid2">
-        <div>
-            <div class="sectionTitle">Closed Trades / PnL</div>
-            <div class="card">
-                <div class="scroll">
-                    <table>
-                        <thead><tr><th>Symbol</th><th>Side</th><th>Entry</th><th>Exit</th><th>Qty</th><th>PnL</th><th>Time</th></tr></thead>
-                        <tbody id="pnlBody"><tr><td colspan="7">Loading...</td></tr></tbody>
-                    </table>
-                </div>
-            </div>
-        </div>
-        <div>
-            <div class="sectionTitle">System Detail</div>
-            <div class="card"><pre id="systemBox">Loading...</pre></div><div class="sectionTitle">Analytics Detail</div><div class="card"><pre id="analyticsBox">Loading...</pre></div>
-        </div>
+    <div class="grid3">
+        <div class="card"><h3>PRO Engine</h3><pre id="proBox">Loading...</pre></div>
+        <div class="card"><h3>Scanner Status</h3><pre id="scannerBox">Loading...</pre></div>
+        <div class="card"><h3>System Detail</h3><pre id="systemBox">Loading...</pre></div>
     </div>
 </div>
 
@@ -2221,23 +2746,73 @@ function fmt(n) {
 }
 function pill(txt, cls="neutral") { return `<span class="pill ${cls}">${txt ?? ""}</span>`; }
 
+function drawEquity(points) {
+    const canvas = document.getElementById("equityCanvas");
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    const w = canvas.width, h = canvas.height;
+    ctx.clearRect(0,0,w,h);
+    ctx.fillStyle = "rgba(2,6,23,.25)";
+    ctx.fillRect(0,0,w,h);
+
+    ctx.strokeStyle = "rgba(148,163,184,.18)";
+    ctx.lineWidth = 1;
+    for (let i=0;i<5;i++) {
+        const y = 20 + i*(h-40)/4;
+        ctx.beginPath(); ctx.moveTo(20,y); ctx.lineTo(w-20,y); ctx.stroke();
+    }
+
+    if (!points || points.length === 0) {
+        ctx.fillStyle = "#94a3b8"; ctx.font = "16px Arial";
+        ctx.fillText("No closed trades yet", 30, 45);
+        return;
+    }
+
+    const vals = points.map(p => Number(p.equity || 0));
+    let min = Math.min(...vals), max = Math.max(...vals);
+    if (min === max) { min -= 1; max += 1; }
+
+    const xStep = (w-50) / Math.max(points.length-1, 1);
+    function y(v){ return h-25 - ((v-min)/(max-min))*(h-55); }
+
+    ctx.beginPath();
+    vals.forEach((v,i) => {
+        const x = 25 + i*xStep;
+        if (i===0) ctx.moveTo(x,y(v)); else ctx.lineTo(x,y(v));
+    });
+    ctx.strokeStyle = vals[vals.length-1] >= 0 ? "#22c55e" : "#ef4444";
+    ctx.lineWidth = 3;
+    ctx.stroke();
+
+    ctx.fillStyle = "#e5e7eb"; ctx.font = "12px Arial";
+    ctx.fillText("Equity: " + money(vals[vals.length-1]), 28, 22);
+}
+
 async function loadRoot() {
     const d = await getJson("/");
     document.getElementById("serverStatus").textContent = d.status || "unknown";
     document.getElementById("serverStatus").className = "big green";
-    document.getElementById("serviceName").textContent = d.service || "";
+    document.getElementById("serverLine").textContent = d.service || "";
+    document.getElementById("serviceBadge").textContent = d.service || "service";
 }
 async function loadConfig() {
     const d = await getJson("/config");
     document.getElementById("executionStatus").textContent = d.execution_enabled ? "LIVE ON" : "SAFE";
     document.getElementById("executionStatus").className = d.execution_enabled ? "big red" : "big green";
-    document.getElementById("riskLine").textContent = `Default: ${d.default_exchange} | Risk: ${d.max_risk_pct_per_trade}% | AutoRisk: ${d.auto_risk_enabled}`;
+    document.getElementById("riskLine").textContent = `Default ${d.default_exchange} | Risk ${d.max_risk_pct_per_trade}% | Trail ${d.pa_trail_enabled}`;
 }
 async function loadSafety() {
     const d = await getJson("/safety/status");
     document.getElementById("safetyStatus").textContent = d.emergency_stop ? "STOPPED" : "OK";
     document.getElementById("safetyStatus").className = d.emergency_stop ? "big red" : "big green";
     document.getElementById("safetyLine").textContent = d.session_reason || "";
+    return d;
+}
+async function loadManager() {
+    const d = await getJson("/manager/status");
+    document.getElementById("managerStatus").textContent = d.running ? "RUNNING" : "OFF";
+    document.getElementById("managerStatus").className = d.running ? "big green" : "big yellow";
+    document.getElementById("managerLine").textContent = `Every ${d.sleep_seconds}s | PA Trail ${d.pa_trailing_enabled} | Last ${d.last_run || "never"}`;
     return d;
 }
 async function loadScanner() {
@@ -2258,41 +2833,43 @@ async function loadScanner() {
     if (!interested.length) {
         body.innerHTML = '<tr><td colspan="6" class="small">No interesting setups right now</td></tr>';
     } else {
-        body.innerHTML = interested.slice(0, 60).map(r => {
+        body.innerHTML = interested.slice(0, 80).map(r => {
             const ob = r.orderbook || {};
-            const sigCls = r.signal === "long" ? "long" : r.signal === "short" ? "short" : "neutral";
+            const sigCls = r.signal === "long" ? "long" : r.signal === "short" ? "short" : "watch";
             return `<tr>
                 <td>${r.symbol || ""}</td>
                 <td>${pill(r.signal || "watch", sigCls)}</td>
                 <td>${r.structure || ""}</td>
                 <td>${r.q ?? ""}</td>
                 <td>${ob.pressure || ""} ${ob.ratio ? "(" + Number(ob.ratio).toFixed(2) + ")" : ""}</td>
-                <td>${r.reason || (r.execution ? JSON.stringify(r.execution) : "")}</td>
+                <td>${r.reason || r.execution?.reason || ""}</td>
             </tr>`;
         }).join("");
     }
-    return d;
 }
 async function loadPositions() {
-    const d = await getJson("/positions/open");
+    const d = await getJson("/positions/live");
     const rows = d.rows || [];
     document.getElementById("openCount").textContent = rows.length;
+    const unreal = rows.reduce((a,p)=>a + Number(p.unrealized_pnl || 0), 0);
+    document.getElementById("unrealizedPnl").textContent = money(unreal);
+    document.getElementById("unrealizedPnl").className = unreal >= 0 ? "big green" : "big red";
+
     const body = document.getElementById("positionsBody");
     if (!rows.length) {
-        body.innerHTML = '<tr><td colspan="11" class="small">No open positions</td></tr>';
+        body.innerHTML = '<tr><td colspan="10" class="small">No open positions</td></tr>';
         return;
     }
     body.innerHTML = rows.map(p => `<tr>
         <td>${pill(p.status, "open")}</td>
         <td>${p.ticker}</td>
         <td>${pill(p.signal, p.signal)}</td>
-        <td>${p.exchange}</td>
         <td>${fmt(p.entry_price)}</td>
+        <td>${fmt(p.mark_price)}</td>
         <td>${fmt(p.stop_price)}</td>
+        <td class="${(p.unrealized_pnl || 0) >= 0 ? "green" : "red"}">${money(p.unrealized_pnl || 0)}</td>
+        <td>${fmt(p.current_r)}</td>
         <td>${fmt(p.qty)}</td>
-        <td>${fmt(p.risk_usd)}</td>
-        <td>${p.break_even_armed ? "YES" : "NO"}</td>
-        <td>${p.trail_armed ? "YES" : "NO"}</td>
         <td><button class="danger" onclick="closePosition('${p.id}')">Close</button></td>
     </tr>`).join("");
 }
@@ -2303,84 +2880,80 @@ async function loadStats() {
     document.getElementById("realizedPnl").className = (s.realized_pnl || 0) >= 0 ? "big green" : "big red";
     document.getElementById("winRate").textContent = Number(s.win_rate || 0).toFixed(1) + "%";
     document.getElementById("winBar").style.width = Math.min(100, Math.max(0, s.win_rate || 0)) + "%";
-    document.getElementById("wlLine").textContent = `W: ${s.wins || 0} | L: ${s.losses || 0} | BE: ${s.breakeven || 0}`;
+    document.getElementById("wlLine").textContent = `W ${s.wins || 0} | L ${s.losses || 0} | BE ${s.breakeven || 0}`;
 
     const body = document.getElementById("pnlBody");
     const rows = d.pnl_rows || [];
     if (!rows.length) {
         body.innerHTML = '<tr><td colspan="7" class="small">No closed trades with PnL yet</td></tr>';
     } else {
-        body.innerHTML = rows.map(r => `<tr>
-            <td>${r.ticker}</td>
-            <td>${pill(r.signal, r.signal)}</td>
-            <td>${fmt(r.entry_price)}</td>
-            <td>${fmt(r.close_price)}</td>
-            <td>${fmt(r.qty)}</td>
-            <td class="${(r.pnl || 0) >= 0 ? "green" : "red"}">${money(r.pnl)}</td>
-            <td>${r.created_at || ""}</td>
+        body.innerHTML = rows.slice(0,80).map(r => `<tr>
+            <td>${r.ticker}</td><td>${pill(r.signal, r.signal)}</td>
+            <td>${fmt(r.entry_price)}</td><td>${fmt(r.close_price)}</td><td>${fmt(r.qty)}</td>
+            <td class="${(r.pnl || 0) >= 0 ? "green" : "red"}">${money(r.pnl)}</td><td>${r.created_at || ""}</td>
         </tr>`).join("");
     }
-    return d;
+}
+async function loadAnalytics() {
+    try {
+        const d = await getJson("/analytics/summary");
+        drawEquity(d.equity_curve || []);
+    } catch(e) { drawEquity([]); }
 }
 async function loadSystem() {
-    const [ws, safety] = await Promise.allSettled([getJson("/futures/ws/status"), getJson("/safety/status")]);
+    const [ws, safety, manager, adaptive, pro] = await Promise.allSettled([
+        getJson("/futures/ws/status"), getJson("/safety/status"), getJson("/manager/status"), getJson("/adaptive/status"), getJson("/pro-engine/status")
+    ]);
     document.getElementById("systemBox").textContent = JSON.stringify({
         websocket: ws.value || ws.reason?.message,
-        safety: safety.value || safety.reason?.message
+        safety: safety.value || safety.reason?.message,
+        manager: manager.value || manager.reason?.message,
+        adaptive: adaptive.value || adaptive.reason?.message
     }, null, 2);
+    document.getElementById("proBox").textContent = JSON.stringify(pro.value || pro.reason?.message, null, 2);
+
+    const healthy = (safety.value && !safety.value.emergency_stop) && (manager.value && manager.value.running);
+    document.getElementById("healthDot").className = healthy ? "dot green" : "dot red";
+    document.getElementById("healthText").textContent = healthy ? "System healthy: manager online and safety OK" : "Check safety/manager status";
 }
-
-async function startScanner(){ await action("/scanner/start", "POST"); }
-async function stopScanner(){ await action("/scanner/stop", "POST"); }
-async function scanOnce(){ await action("/scanner/scan-once", "POST"); }
-async function refreshDiscovery(){ await action("/scanner/discover-refresh", "POST"); }
-async function startWs(){ await action("/futures/ws/start", "POST"); }
-async function stopWs(){ await action("/futures/ws/stop", "POST"); }
-async function syncFutures(){ await action("/futures/sync-open", "POST"); }
-async function emergencyStop(){ if(confirm("Emergency stop?")) await action("/safety/emergency-stop?reason=dashboard", "POST"); }
-async function resumeSafety(){ await action("/safety/resume", "POST"); }
-async function closePosition(id){ if(confirm("Close position?")) await action("/positions/close/" + id, "POST"); }
-
 async function action(url, method) {
     try {
         const d = await getJson(url, {method});
-        document.getElementById("controlResult").textContent = JSON.stringify(d).slice(0, 500);
-        setTimeout(refreshAll, 800);
+        document.getElementById("controlResult").textContent = JSON.stringify(d).slice(0, 600);
+        setTimeout(refreshAll, 700);
     } catch(e) {
         document.getElementById("controlResult").textContent = e.message;
     }
 }
-
-async function loadAnalytics() {
-    try {
-        const d = await getJson("/analytics/summary");
-        const el = document.getElementById("analyticsBox");
-        if (el) el.textContent = JSON.stringify(d, null, 2);
-    } catch(e) {
-        const el = document.getElementById("analyticsBox");
-        if (el) el.textContent = "Analytics unavailable: " + e.message;
-    }
-}
-
+async function startScanner(){ await action("/scanner/start", "POST"); }
+async function stopScanner(){ await action("/scanner/stop", "POST"); }
+async function scanOnce(){ await action("/scanner/scan-once", "POST"); }
+async function refreshDiscovery(){ await action("/scanner/discover-refresh", "POST"); }
+async function startManager(){ await action("/manager/start", "POST"); }
+async function stopManager(){ await action("/manager/stop", "POST"); }
+async function startWs(){ await action("/futures/ws/start", "POST"); }
+async function stopWs(){ await action("/futures/ws/stop", "POST"); }
+async function syncFutures(){ await action("/futures/sync-open", "POST"); }
+async function resetPro(){ await action("/pro-engine/reset", "POST"); }
+async function emergencyStop(){ if(confirm("Emergency stop scanner/trading?")) await action("/safety/emergency-stop?reason=dashboard", "POST"); }
+async function resumeSafety(){ await action("/safety/resume", "POST"); }
+async function closePosition(id){ if(confirm("Close this position?")) await action("/positions/close/" + id, "POST"); }
 async function refreshAll() {
-    await Promise.allSettled([loadRoot(), loadConfig(), loadSafety(), loadScanner(), loadPositions(), loadStats(), loadSystem(), loadAnalytics()]);
+    await Promise.allSettled([loadRoot(), loadConfig(), loadSafety(), loadManager(), loadScanner(), loadPositions(), loadStats(), loadAnalytics(), loadSystem()]);
+    document.getElementById("clockBadge").textContent = new Date().toLocaleTimeString();
 }
 refreshAll();
-setInterval(refreshAll, 10000);
+setInterval(refreshAll, 5000);
 </script>
 </body>
 </html>
 """
 
 
-@app.get("/dashboard/stats")
-def dashboard_stats():
-    return dashboard_stats_data()
-
 
 @app.get("/")
 def root():
-    return {"status": "ok", "service": "binance-spot-futures-bot-pro-final-analytics-alerts-v1", "time": now_iso()}
+    return {"status": "ok", "service": "binance-spot-futures-bot-pro-final-command-center-v1", "time": now_iso()}
 
 
 @app.get("/config")
