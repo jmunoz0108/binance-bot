@@ -262,6 +262,61 @@ def structure_filter(payload: SignalPayload):
     return {"allow": False, "trend": "sideways", "reason": "sideways structure"}
 
 
+
+def get_orderbook_pressure(symbol: str):
+    """
+    Binance Futures orderbook pressure filter.
+    Uses top 20 levels of futures depth.
+    Returns buyers / sellers / neutral / unknown.
+    """
+    symbol = symbol.upper().replace(".P", "")
+    try:
+        r = public_get(BINANCE_FUTURES_BASE_URL, "/fapi/v1/depth", {"symbol": symbol, "limit": 20})
+        if r["status_code"] >= 400:
+            return {"pressure": "unknown", "reason": r["text"]}
+
+        bids = r["json"].get("bids", [])
+        asks = r["json"].get("asks", [])
+
+        bid_qty = sum(float(b[1]) for b in bids)
+        ask_qty = sum(float(a[1]) for a in asks)
+
+        if bid_qty <= 0 or ask_qty <= 0:
+            return {"pressure": "unknown", "reason": "empty book", "bid_qty": bid_qty, "ask_qty": ask_qty}
+
+        buyer_ratio = bid_qty / ask_qty
+        seller_ratio = ask_qty / bid_qty
+
+        if buyer_ratio >= 1.20:
+            return {
+                "pressure": "buyers",
+                "ratio": buyer_ratio,
+                "bid_qty": bid_qty,
+                "ask_qty": ask_qty,
+                "levels": 20
+            }
+
+        if seller_ratio >= 1.20:
+            return {
+                "pressure": "sellers",
+                "ratio": seller_ratio,
+                "bid_qty": bid_qty,
+                "ask_qty": ask_qty,
+                "levels": 20
+            }
+
+        return {
+            "pressure": "neutral",
+            "ratio": 1.0,
+            "bid_qty": bid_qty,
+            "ask_qty": ask_qty,
+            "levels": 20
+        }
+
+    except Exception as exc:
+        return {"pressure": "unknown", "reason": str(exc)}
+
+
 def build_order_plan(payload: SignalPayload):
     entry = float(payload.close)
     risk_pct = min(MAX_RISK_PCT_PER_TRADE, 0.50 if payload.preset in ["Scalping", "Day Trading"] else 0.75)
@@ -423,18 +478,42 @@ def execute(payload: SignalPayload):
 
     structure = structure_filter(payload)
 
+    orderbook = get_orderbook_pressure(payload.ticker)
+
+    if payload.signal in ["long", "buy"] and orderbook.get("pressure") == "sellers":
+        response = {
+            "approved": False,
+            "reason": "blocked: strong sellers in orderbook",
+            "structure": structure,
+            "orderbook": orderbook,
+            "ts": now_iso()
+        }
+        journal(payload, False, "blocked: strong sellers in orderbook", response)
+        return response
+
+    if payload.signal in ["short", "sell"] and orderbook.get("pressure") == "buyers":
+        response = {
+            "approved": False,
+            "reason": "blocked: strong buyers in orderbook",
+            "structure": structure,
+            "orderbook": orderbook,
+            "ts": now_iso()
+        }
+        journal(payload, False, "blocked: strong buyers in orderbook", response)
+        return response
+
     if not structure["allow"]:
-        response = {"approved": False, "reason": structure["reason"], "structure": structure, "ts": now_iso()}
+        response = {"approved": False, "reason": structure["reason"], "structure": structure, "orderbook": orderbook, "ts": now_iso()}
         journal(payload, False, structure["reason"], response)
         return response
 
     if payload.signal in ["long", "buy"] and structure.get("trend") == "bearish":
-        response = {"approved": False, "reason": "blocked: bearish structure", "structure": structure, "ts": now_iso()}
+        response = {"approved": False, "reason": "blocked: bearish structure", "structure": structure, "orderbook": orderbook, "ts": now_iso()}
         journal(payload, False, "blocked: bearish structure", response)
         return response
 
     if payload.signal in ["short", "sell"] and structure.get("trend") == "bullish":
-        response = {"approved": False, "reason": "blocked: bullish structure", "structure": structure, "ts": now_iso()}
+        response = {"approved": False, "reason": "blocked: bullish structure", "structure": structure, "orderbook": orderbook, "ts": now_iso()}
         journal(payload, False, "blocked: bullish structure", response)
         return response
 
@@ -451,7 +530,7 @@ def execute(payload: SignalPayload):
         result = {"submitted": False, "reason": f"unsupported exchange: {exchange}"}
 
     approved = bool(result.get("submitted"))
-    response = {"approved": approved, "exchange": exchange, "structure": structure, "order_plan": plan, "result": result, "ts": now_iso()}
+    response = {"approved": approved, "exchange": exchange, "structure": structure, "orderbook": orderbook, "order_plan": plan, "result": result, "ts": now_iso()}
     journal(payload, approved, result.get("reason", ""), response)
     return response
 
@@ -736,7 +815,7 @@ async def _futures_ws_loop():
 
 @app.get("/")
 def root():
-    return {"status": "ok", "service": "binance-spot-futures-bot-pro-final-structure", "time": now_iso()}
+    return {"status": "ok", "service": "binance-spot-futures-bot-pro-final-structure-orderbook", "time": now_iso()}
 
 
 @app.get("/config")
@@ -875,5 +954,3 @@ def futures_ws_status():
 def futures_sync_open_positions():
     positions = get_all_open_futures_positions()
     return {"count": len(positions), "results": [sync_single_futures_position_from_exchange(p) for p in positions]}
-  
-  

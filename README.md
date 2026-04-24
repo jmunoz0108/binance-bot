@@ -1,9 +1,8 @@
-# Binance Bot PRO Final + Structure
+# Binance Bot PRO Final + Structure + Orderbook
 
-Adds structure filter:
-- blocks sideways structure
-- blocks long trades in bearish structure
-- blocks short trades in bullish structure
-- allows old alerts when no structure data is sent
-
-Test locally first, then push to GitHub/Railway.
+Adds:
+- structure filter
+- orderbook pressure filter
+- blocks longs into strong sellers
+- blocks shorts into strong buyers
+- keeps previous futures websocket and manager endpoints
