@@ -289,6 +289,9 @@ def get_orderbook_pressure(symbol: str):
 
         if buyer_ratio >= 1.20:
             return {
+        "paper_long_bos_sweep": '{"signal":"long","ticker":"{{ticker}}","tf":"{{interval}}","close":{{close}},"score":7,"exchange":"paper","secret":"CHANGE_ME","extra":{"highs":[{{high[2]}},{{high[1]}},{{high}}],"lows":[{{low[2]}},{{low[1]}},{{low}}],"bos":true,"sweep":false,"sweep_direction":"none","volume_spike":true,"candle_confirm":true}}',
+        "futures_long_bos_sweep": '{"signal":"long","ticker":"{{ticker}}","tf":"{{interval}}","close":{{close}},"score":7,"exchange":"binance_futures","futures_mode":"one_way","margin_type":"isolated","leverage":2,"position_side":"BOTH","secret":"CHANGE_ME","extra":{"highs":[{{high[2]}},{{high[1]}},{{high}}],"lows":[{{low[2]}},{{low[1]}},{{low}}],"bos":true,"sweep":false,"sweep_direction":"none","volume_spike":true,"candle_confirm":true}}',
+        "futures_short_bos_sweep": '{"signal":"short","ticker":"{{ticker}}","tf":"{{interval}}","close":{{close}},"score":7,"exchange":"binance_futures","futures_mode":"one_way","margin_type":"isolated","leverage":2,"position_side":"BOTH","secret":"CHANGE_ME","extra":{"highs":[{{high[2]}},{{high[1]}},{{high}}],"lows":[{{low[2]}},{{low[1]}},{{low}}],"bos":true,"sweep":false,"sweep_direction":"none","volume_spike":true,"candle_confirm":true}}',
                 "pressure": "buyers",
                 "ratio": buyer_ratio,
                 "bid_qty": bid_qty,
@@ -315,6 +318,121 @@ def get_orderbook_pressure(symbol: str):
 
     except Exception as exc:
         return {"pressure": "unknown", "reason": str(exc)}
+
+
+
+def setup_quality_filter(payload: SignalPayload, structure: Dict[str, Any]):
+    """
+    BOS + Liquidity Sweep setup filter.
+    TradingView sends these inside payload.extra:
+      bos: true/false
+      sweep: true/false
+      sweep_direction: "bullish" / "bearish" / "none"
+      volume_spike: true/false
+      candle_confirm: true/false
+
+    Rules:
+      LONG: needs bullish structure AND (BOS or bullish sweep)
+      SHORT: needs bearish structure AND (BOS or bearish sweep)
+      volume_spike and candle_confirm are optional quality boosters.
+    """
+    extra = payload.extra or {}
+
+    bos = bool(extra.get("bos", False))
+    sweep = bool(extra.get("sweep", False))
+    sweep_direction = str(extra.get("sweep_direction", "none")).lower()
+    volume_spike = bool(extra.get("volume_spike", False))
+    candle_confirm = bool(extra.get("candle_confirm", False))
+
+    signal = payload.signal
+    trend = structure.get("trend", "unknown")
+
+    # If no structure data is sent, do not hard-block old alerts yet.
+    if trend == "unknown":
+        return {
+            "allow": True,
+            "reason": "no structure data, setup filter bypassed",
+            "bos": bos,
+            "sweep": sweep,
+            "sweep_direction": sweep_direction,
+            "volume_spike": volume_spike,
+            "candle_confirm": candle_confirm,
+            "quality_score": 0
+        }
+
+    bullish_trigger = bos or (sweep and sweep_direction == "bullish")
+    bearish_trigger = bos or (sweep and sweep_direction == "bearish")
+
+    quality_score = 0
+    if bos:
+        quality_score += 1
+    if sweep:
+        quality_score += 1
+    if volume_spike:
+        quality_score += 1
+    if candle_confirm:
+        quality_score += 1
+
+    if signal in ["long", "buy"]:
+        if trend != "bullish":
+            return {
+                "allow": False,
+                "reason": "blocked: long requires bullish structure",
+                "bos": bos,
+                "sweep": sweep,
+                "sweep_direction": sweep_direction,
+                "volume_spike": volume_spike,
+                "candle_confirm": candle_confirm,
+                "quality_score": quality_score
+            }
+
+        if not bullish_trigger:
+            return {
+                "allow": False,
+                "reason": "blocked: long needs BOS or bullish sweep",
+                "bos": bos,
+                "sweep": sweep,
+                "sweep_direction": sweep_direction,
+                "volume_spike": volume_spike,
+                "candle_confirm": candle_confirm,
+                "quality_score": quality_score
+            }
+
+    if signal in ["short", "sell"]:
+        if trend != "bearish":
+            return {
+                "allow": False,
+                "reason": "blocked: short requires bearish structure",
+                "bos": bos,
+                "sweep": sweep,
+                "sweep_direction": sweep_direction,
+                "volume_spike": volume_spike,
+                "candle_confirm": candle_confirm,
+                "quality_score": quality_score
+            }
+
+        if not bearish_trigger:
+            return {
+                "allow": False,
+                "reason": "blocked: short needs BOS or bearish sweep",
+                "bos": bos,
+                "sweep": sweep,
+                "sweep_direction": sweep_direction,
+                "volume_spike": volume_spike,
+                "candle_confirm": candle_confirm,
+                "quality_score": quality_score
+            }
+
+    return {
+        "allow": True,
+        "reason": "setup quality passed",
+        "bos": bos,
+        "sweep": sweep,
+        "sweep_direction": sweep_direction,
+        "volume_spike": volume_spike,
+        "candle_confirm": candle_confirm,
+        "quality_score": quality_score
+    }
 
 
 def build_order_plan(payload: SignalPayload):
@@ -502,18 +620,32 @@ def execute(payload: SignalPayload):
         journal(payload, False, "blocked: strong buyers in orderbook", response)
         return response
 
+    setup_quality = setup_quality_filter(payload, structure)
+
+    if not setup_quality["allow"]:
+        response = {
+            "approved": False,
+            "reason": setup_quality["reason"],
+            "structure": structure,
+            "orderbook": orderbook,
+            "setup_quality": setup_quality,
+            "ts": now_iso()
+        }
+        journal(payload, False, setup_quality["reason"], response)
+        return response
+
     if not structure["allow"]:
-        response = {"approved": False, "reason": structure["reason"], "structure": structure, "orderbook": orderbook, "ts": now_iso()}
+        response = {"approved": False, "reason": structure["reason"], "structure": structure, "orderbook": orderbook, "setup_quality": setup_quality, "ts": now_iso()}
         journal(payload, False, structure["reason"], response)
         return response
 
     if payload.signal in ["long", "buy"] and structure.get("trend") == "bearish":
-        response = {"approved": False, "reason": "blocked: bearish structure", "structure": structure, "orderbook": orderbook, "ts": now_iso()}
+        response = {"approved": False, "reason": "blocked: bearish structure", "structure": structure, "orderbook": orderbook, "setup_quality": setup_quality, "ts": now_iso()}
         journal(payload, False, "blocked: bearish structure", response)
         return response
 
     if payload.signal in ["short", "sell"] and structure.get("trend") == "bullish":
-        response = {"approved": False, "reason": "blocked: bullish structure", "structure": structure, "orderbook": orderbook, "ts": now_iso()}
+        response = {"approved": False, "reason": "blocked: bullish structure", "structure": structure, "orderbook": orderbook, "setup_quality": setup_quality, "ts": now_iso()}
         journal(payload, False, "blocked: bullish structure", response)
         return response
 
@@ -530,7 +662,7 @@ def execute(payload: SignalPayload):
         result = {"submitted": False, "reason": f"unsupported exchange: {exchange}"}
 
     approved = bool(result.get("submitted"))
-    response = {"approved": approved, "exchange": exchange, "structure": structure, "orderbook": orderbook, "order_plan": plan, "result": result, "ts": now_iso()}
+    response = {"approved": approved, "exchange": exchange, "structure": structure, "orderbook": orderbook, "setup_quality": setup_quality, "order_plan": plan, "result": result, "ts": now_iso()}
     journal(payload, approved, result.get("reason", ""), response)
     return response
 
@@ -815,7 +947,7 @@ async def _futures_ws_loop():
 
 @app.get("/")
 def root():
-    return {"status": "ok", "service": "binance-spot-futures-bot-pro-final-structure-orderbook", "time": now_iso()}
+    return {"status": "ok", "service": "binance-spot-futures-bot-pro-final-bos-sweep", "time": now_iso()}
 
 
 @app.get("/config")

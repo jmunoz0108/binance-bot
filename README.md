@@ -1,8 +1,16 @@
-# Binance Bot PRO Final + Structure + Orderbook
+# Binance Bot PRO Final + BOS Sweep
 
 Adds:
 - structure filter
-- orderbook pressure filter
-- blocks longs into strong sellers
-- blocks shorts into strong buyers
-- keeps previous futures websocket and manager endpoints
+- futures orderbook pressure filter
+- BOS filter
+- liquidity sweep filter
+- volume/candle quality fields
+- blocks weak setups before execution
+
+New TradingView extra fields:
+- bos
+- sweep
+- sweep_direction: bullish / bearish / none
+- volume_spike
+- candle_confirm
