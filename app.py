@@ -620,11 +620,5 @@ def futures_ws_status():
 def futures_sync_open_positions():
     positions = get_all_open_futures_positions()
     return {"count": len(positions), "results": [sync_single_futures_position_from_exchange(p) for p in positions]}
-    def structure_filter(data):
-    highs = data.get("highs", [])
-    lows = data.get("lows", [])
-
-    if len(highs) < 3 or len(lows) < 3:
-        return {"allow": False, "reason": "not enough structure"}
-
+  
   
