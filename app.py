@@ -58,6 +58,12 @@ SCANNER_COOLDOWN_SECONDS = int(os.getenv("SCANNER_COOLDOWN_SECONDS", "900"))
 SCANNER_MIN_QUALITY = int(os.getenv("SCANNER_MIN_QUALITY", "2"))
 SCANNER_LEVERAGE = int(os.getenv("SCANNER_LEVERAGE", "2"))
 
+
+CONTINUATION_ENABLED = os.getenv("CONTINUATION_ENABLED", "true").lower() == "true"
+CONTINUATION_PULLBACK_MIN_PCT = float(os.getenv("CONTINUATION_PULLBACK_MIN_PCT", "0.25"))
+CONTINUATION_PULLBACK_MAX_PCT = float(os.getenv("CONTINUATION_PULLBACK_MAX_PCT", "2.50"))
+CONTINUATION_LOOKBACK = int(os.getenv("CONTINUATION_LOOKBACK", "8"))
+
 SCANNER_STATE: Dict[str, Any] = {
     "task": None,
     "running": False,
@@ -341,6 +347,68 @@ def get_orderbook_pressure(symbol: str):
 
 
 
+
+def continuation_filter(payload: SignalPayload, structure: Dict[str, Any]):
+    """
+    Optional continuation mode.
+    TradingView can send:
+      continuation: true/false
+      continuation_direction: bullish/bearish/none
+      pullback_pct: number
+      minor_break: true/false
+
+    This allows trend pullback continuation entries, so the bot can catch
+    big moves AFTER the first BOS/sweep instead of only the first breakout.
+    """
+    extra = payload.extra or {}
+    if not CONTINUATION_ENABLED:
+        return {"allow": False, "reason": "continuation disabled", "mode": "off"}
+
+    continuation = bool(extra.get("continuation", False))
+    continuation_direction = str(extra.get("continuation_direction", "none")).lower()
+    minor_break = bool(extra.get("minor_break", False))
+    try:
+        pullback_pct = float(extra.get("pullback_pct", 0))
+    except Exception:
+        pullback_pct = 0.0
+
+    if not continuation:
+        return {"allow": False, "reason": "not continuation setup", "mode": "none"}
+
+    trend = structure.get("trend", "unknown")
+    signal = payload.signal
+
+    valid_pullback = CONTINUATION_PULLBACK_MIN_PCT <= pullback_pct <= CONTINUATION_PULLBACK_MAX_PCT
+
+    if signal in ["long", "buy"]:
+        ok = trend == "bullish" and continuation_direction == "bullish" and minor_break and valid_pullback
+        return {
+            "allow": ok,
+            "reason": "continuation long passed" if ok else "continuation long failed",
+            "mode": "continuation",
+            "continuation": continuation,
+            "continuation_direction": continuation_direction,
+            "minor_break": minor_break,
+            "pullback_pct": pullback_pct,
+            "valid_pullback": valid_pullback,
+        }
+
+    if signal in ["short", "sell"]:
+        ok = trend == "bearish" and continuation_direction == "bearish" and minor_break and valid_pullback
+        return {
+            "allow": ok,
+            "reason": "continuation short passed" if ok else "continuation short failed",
+            "mode": "continuation",
+            "continuation": continuation,
+            "continuation_direction": continuation_direction,
+            "minor_break": minor_break,
+            "pullback_pct": pullback_pct,
+            "valid_pullback": valid_pullback,
+        }
+
+    return {"allow": False, "reason": "unknown signal", "mode": "continuation"}
+
+
 def setup_quality_filter(payload: SignalPayload, structure: Dict[str, Any]):
     """
     BOS + Liquidity Sweep setup filter.
@@ -407,15 +475,30 @@ def setup_quality_filter(payload: SignalPayload, structure: Dict[str, Any]):
             }
 
         if not bullish_trigger:
+            cont = continuation_filter(payload, structure)
+            if cont.get("allow"):
+                quality_score += 1
+                return {
+                    "allow": True,
+                    "reason": "setup quality passed by continuation mode",
+                    "bos": bos,
+                    "sweep": sweep,
+                    "sweep_direction": sweep_direction,
+                    "volume_spike": volume_spike,
+                    "candle_confirm": candle_confirm,
+                    "quality_score": quality_score,
+                    "continuation": cont
+                }
             return {
                 "allow": False,
-                "reason": "blocked: long needs BOS or bullish sweep",
+                "reason": "blocked: long needs BOS, bullish sweep, or continuation",
                 "bos": bos,
                 "sweep": sweep,
                 "sweep_direction": sweep_direction,
                 "volume_spike": volume_spike,
                 "candle_confirm": candle_confirm,
-                "quality_score": quality_score
+                "quality_score": quality_score,
+                "continuation": cont
             }
 
     if signal in ["short", "sell"]:
@@ -432,15 +515,30 @@ def setup_quality_filter(payload: SignalPayload, structure: Dict[str, Any]):
             }
 
         if not bearish_trigger:
+            cont = continuation_filter(payload, structure)
+            if cont.get("allow"):
+                quality_score += 1
+                return {
+                    "allow": True,
+                    "reason": "setup quality passed by continuation mode",
+                    "bos": bos,
+                    "sweep": sweep,
+                    "sweep_direction": sweep_direction,
+                    "volume_spike": volume_spike,
+                    "candle_confirm": candle_confirm,
+                    "quality_score": quality_score,
+                    "continuation": cont
+                }
             return {
                 "allow": False,
-                "reason": "blocked: short needs BOS or bearish sweep",
+                "reason": "blocked: short needs BOS, bearish sweep, or continuation",
                 "bos": bos,
                 "sweep": sweep,
                 "sweep_direction": sweep_direction,
                 "volume_spike": volume_spike,
                 "candle_confirm": candle_confirm,
-                "quality_score": quality_score
+                "quality_score": quality_score,
+                "continuation": cont
             }
 
     return {
@@ -1031,6 +1129,18 @@ def analyze_symbol_for_setup(symbol: str):
     bull_candle = last["close"] > last["open"]
     bear_candle = last["close"] < last["open"]
 
+    recent_high = max(c["high"] for c in candles[-CONTINUATION_LOOKBACK-1:-1])
+    recent_low = min(c["low"] for c in candles[-CONTINUATION_LOOKBACK-1:-1])
+
+    bull_pullback_pct = ((recent_high - last["low"]) / recent_high) * 100 if recent_high > 0 else 0
+    bear_pullback_pct = ((last["high"] - recent_low) / recent_low) * 100 if recent_low > 0 else 0
+
+    bull_minor_break = last["close"] > prev["high"]
+    bear_minor_break = last["close"] < prev["low"]
+
+    bull_continuation = bull_structure and bull_minor_break and CONTINUATION_PULLBACK_MIN_PCT <= bull_pullback_pct <= CONTINUATION_PULLBACK_MAX_PCT
+    bear_continuation = bear_structure and bear_minor_break and CONTINUATION_PULLBACK_MIN_PCT <= bear_pullback_pct <= CONTINUATION_PULLBACK_MAX_PCT
+
     orderbook = get_orderbook_pressure(symbol)
 
     long_quality = 0
@@ -1045,8 +1155,8 @@ def analyze_symbol_for_setup(symbol: str):
     if volume_spike: short_quality += 1
     if bear_candle: short_quality += 1
 
-    long_ok = bull_structure and (bull_bos or bull_sweep) and bull_candle and long_quality >= SCANNER_MIN_QUALITY and orderbook.get("pressure") != "sellers"
-    short_ok = bear_structure and (bear_bos or bear_sweep) and bear_candle and short_quality >= SCANNER_MIN_QUALITY and orderbook.get("pressure") != "buyers"
+    long_ok = bull_structure and ((bull_bos or bull_sweep) or bull_continuation) and bull_candle and long_quality >= SCANNER_MIN_QUALITY and orderbook.get("pressure") != "sellers"
+    short_ok = bear_structure and ((bear_bos or bear_sweep) or bear_continuation) and bear_candle and short_quality >= SCANNER_MIN_QUALITY and orderbook.get("pressure") != "buyers"
 
     if long_ok:
         return {
@@ -1064,7 +1174,11 @@ def analyze_symbol_for_setup(symbol: str):
                 "sweep_direction": "bullish" if bull_sweep else "none",
                 "volume_spike": bool(volume_spike),
                 "candle_confirm": bool(bull_candle),
-                "scanner": True
+                "scanner": True,
+                "continuation": bool(bull_continuation),
+                "continuation_direction": "bullish" if bull_continuation else "none",
+                "minor_break": bool(bull_minor_break),
+                "pullback_pct": float(bull_pullback_pct)
             }
         }
 
@@ -1084,7 +1198,11 @@ def analyze_symbol_for_setup(symbol: str):
                 "sweep_direction": "bearish" if bear_sweep else "none",
                 "volume_spike": bool(volume_spike),
                 "candle_confirm": bool(bear_candle),
-                "scanner": True
+                "scanner": True,
+                "continuation": bool(bear_continuation),
+                "continuation_direction": "bearish" if bear_continuation else "none",
+                "minor_break": bool(bear_minor_break),
+                "pullback_pct": float(bear_pullback_pct)
             }
         }
 
@@ -1594,7 +1712,7 @@ setInterval(refreshAll, 10000);
 
 @app.get("/")
 def root():
-    return {"status": "ok", "service": "binance-spot-futures-bot-pro-final-auto-scanner", "time": now_iso()}
+    return {"status": "ok", "service": "binance-spot-futures-bot-pro-final-continuation-v1", "time": now_iso()}
 
 
 @app.get("/config")
@@ -1613,6 +1731,9 @@ def config():
         "scanner_exchange": SCANNER_EXCHANGE,
         "scanner_symbols": SCANNER_SYMBOLS,
         "scanner_interval": SCANNER_INTERVAL,
+        "continuation_enabled": CONTINUATION_ENABLED,
+        "continuation_pullback_min_pct": CONTINUATION_PULLBACK_MIN_PCT,
+        "continuation_pullback_max_pct": CONTINUATION_PULLBACK_MAX_PCT,
     }
 
 
