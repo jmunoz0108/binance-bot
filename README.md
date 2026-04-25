@@ -1,16 +1,15 @@
-# Binance Bot AI V3
+# Binance Bot Market Dashboard V1
 
-Adds confidence scoring and controlled auto tuning:
-- confidence score 0-100 per trade
-- blocks low-confidence trades
-- adjusts risk multiplier in bad conditions
-- defensive confidence threshold after bad performance
-- AI V3 dashboard panel
+Dashboard update:
+- removed AI V2 Brain panel
+- added Top Movers panel
+- added New Futures Listings panel
+- added Binance News panel
 
 New endpoints:
-- GET /ai-v3/status
-- GET /ai-v3/confidence/{symbol}/{signal}
-- POST /ai-v3/reset
+- GET /market/top-movers
+- GET /market/new-listings
+- GET /market/news
 
 Service:
-binance-spot-futures-bot-pro-final-ai-v3
+binance-spot-futures-bot-pro-final-market-dashboard-v1

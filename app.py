@@ -2902,6 +2902,102 @@ def ai_v3_reset():
     return {"ok": True, "reason": "AI V3 reset"}
 
 
+
+def market_top_movers(limit: int = 20):
+    r = public_get(BINANCE_FUTURES_BASE_URL, "/fapi/v1/ticker/24hr", {})
+    if r["status_code"] >= 400:
+        raise RuntimeError(r["text"])
+
+    rows = []
+    for t in r["json"]:
+        symbol = t.get("symbol", "")
+        if not symbol.endswith("USDT"):
+            continue
+        try:
+            rows.append({
+                "symbol": symbol,
+                "price_change_percent": float(t.get("priceChangePercent", 0) or 0),
+                "quote_volume": float(t.get("quoteVolume", 0) or 0),
+                "last_price": float(t.get("lastPrice", 0) or 0),
+                "high_price": float(t.get("highPrice", 0) or 0),
+                "low_price": float(t.get("lowPrice", 0) or 0),
+            })
+        except Exception:
+            continue
+
+    return {
+        "gainers": sorted(rows, key=lambda x: x["price_change_percent"], reverse=True)[:limit],
+        "losers": sorted(rows, key=lambda x: x["price_change_percent"])[:limit],
+        "volume": sorted(rows, key=lambda x: x["quote_volume"], reverse=True)[:limit],
+        "count": len(rows),
+        "ts": now_iso()
+    }
+
+
+def market_new_listings(limit: int = 20):
+    r = public_get(BINANCE_FUTURES_BASE_URL, "/fapi/v1/exchangeInfo", {})
+    if r["status_code"] >= 400:
+        raise RuntimeError(r["text"])
+
+    rows = []
+    for s in r["json"].get("symbols", []):
+        if s.get("contractType") != "PERPETUAL":
+            continue
+        if s.get("quoteAsset") != "USDT":
+            continue
+        if s.get("status") != "TRADING":
+            continue
+        rows.append({
+            "symbol": s.get("symbol"),
+            "base_asset": s.get("baseAsset"),
+            "quote_asset": s.get("quoteAsset"),
+            "onboard_date": s.get("onboardDate"),
+            "margin_asset": s.get("marginAsset"),
+            "price_precision": s.get("pricePrecision"),
+            "quantity_precision": s.get("quantityPrecision"),
+        })
+
+    return {"rows": sorted(rows, key=lambda x: x.get("onboard_date") or 0, reverse=True)[:limit], "ts": now_iso()}
+
+
+def market_news(limit: int = 10):
+    url = "https://www.binance.com/bapi/composite/v1/public/cms/article/list/query"
+    payload = {"type": 1, "catalogId": 48, "pageNo": 1, "pageSize": max(1, min(limit, 20))}
+    try:
+        with httpx.Client(timeout=12.0) as client:
+            r = client.post(url, json=payload)
+        data = r.json()
+        articles = (((data or {}).get("data") or {}).get("articles") or [])
+        rows = []
+        for a in articles[:limit]:
+            code = str(a.get("code", ""))
+            rows.append({
+                "title": a.get("title"),
+                "code": code,
+                "release_date": a.get("releaseDate"),
+                "url": "https://www.binance.com/en/support/announcement/" + code,
+            })
+        return {"rows": rows, "source": "binance_announcements", "ts": now_iso()}
+    except Exception as exc:
+        return {"rows": [], "source": "binance_announcements", "error": str(exc), "ts": now_iso()}
+
+
+
+@app.get("/market/top-movers")
+def market_top_movers_endpoint(limit: int = 20):
+    return market_top_movers(limit)
+
+
+@app.get("/market/new-listings")
+def market_new_listings_endpoint(limit: int = 20):
+    return market_new_listings(limit)
+
+
+@app.get("/market/news")
+def market_news_endpoint(limit: int = 10):
+    return market_news(limit)
+
+
 @app.get("/dashboard", response_class=HTMLResponse)
 def dashboard():
     return """
@@ -3114,7 +3210,7 @@ def dashboard():
     </div>
 
     <div class="grid3">
-        <div class="card"><h3>PRO Engine</h3><pre id="proBox">Loading...</pre></div><div class="card"><h3>AI V2 Brain</h3><pre id="aiV2Box">Loading...</pre></div><div class="card"><h3>AI V3 Confidence Brain</h3><pre id="aiV3Box">Loading...</pre></div>
+        <div class="card"><h3>PRO Engine</h3><pre id="proBox">Loading...</pre></div><div class="card"><h3>Top Movers</h3><pre id="topMoversBox">Loading...</pre></div><div class="card"><h3>New Futures Listings</h3><pre id="newListingsBox">Loading...</pre></div><div class="card"><h3>Binance News</h3><pre id="newsBox">Loading...</pre></div><div class="card"><h3>AI V3 Confidence Brain</h3><pre id="aiV3Box">Loading...</pre></div>
         <div class="card"><h3>Scanner Status</h3><pre id="scannerBox">Loading...</pre></div>
         <div class="card"><h3>System Detail</h3><pre id="systemBox">Loading...</pre></div>
     </div>
@@ -3311,6 +3407,36 @@ async function loadAiV2() {
         if (el) el.textContent = "AI V2 unavailable: " + e.message;
     }
 }
+
+async function loadMarketIntel() {
+    try {
+        const [movers, listings, news] = await Promise.allSettled([
+            getJson("/market/top-movers?limit=8"),
+            getJson("/market/new-listings?limit=8"),
+            getJson("/market/news?limit=6")
+        ]);
+
+        const moversBox = document.getElementById("topMoversBox");
+        if (moversBox) {
+            const d = movers.value || {};
+            moversBox.textContent = JSON.stringify({
+                top_gainers: d.gainers || [],
+                top_losers: d.losers || [],
+                top_volume: d.volume || []
+            }, null, 2);
+        }
+
+        const listingsBox = document.getElementById("newListingsBox");
+        if (listingsBox) listingsBox.textContent = JSON.stringify(listings.value || {}, null, 2);
+
+        const newsBox = document.getElementById("newsBox");
+        if (newsBox) newsBox.textContent = JSON.stringify(news.value || {}, null, 2);
+    } catch(e) {
+        const moversBox = document.getElementById("topMoversBox");
+        if (moversBox) moversBox.textContent = "Market intel unavailable: " + e.message;
+    }
+}
+
 async function loadSystem() {
     const [ws, safety, manager, adaptive, pro] = await Promise.allSettled([
         getJson("/futures/ws/status"), getJson("/safety/status"), getJson("/manager/status"), getJson("/adaptive/status"), getJson("/pro-engine/status")
@@ -3350,7 +3476,7 @@ async function emergencyStop(){ if(confirm("Emergency stop scanner/trading?")) a
 async function resumeSafety(){ await action("/safety/resume", "POST"); }
 async function closePosition(id){ if(confirm("Close this position?")) await action("/positions/close/" + id, "POST"); }
 async function refreshAll() {
-    await Promise.allSettled([loadRoot(), loadConfig(), loadSafety(), loadManager(), loadScanner(), loadPositions(), loadStats(), loadAnalytics(), loadSystem(), loadAiV2(), loadAiV3()]);
+    await Promise.allSettled([loadRoot(), loadConfig(), loadSafety(), loadManager(), loadScanner(), loadPositions(), loadStats(), loadAnalytics(), loadSystem(), loadMarketIntel(), loadAiV3(), loadMarketIntel()]);
     document.getElementById("clockBadge").textContent = new Date().toLocaleTimeString();
 }
 refreshAll();
@@ -3369,7 +3495,7 @@ async def startup_ai_v2():
 
 @app.get("/")
 def root():
-    return {"status": "ok", "service": "binance-spot-futures-bot-pro-final-ai-v3", "time": now_iso()}
+    return {"status": "ok", "service": "binance-spot-futures-bot-pro-final-market-dashboard-v1", "time": now_iso()}
 
 
 @app.get("/config")
