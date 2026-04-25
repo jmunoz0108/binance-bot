@@ -80,6 +80,30 @@ PRO_MIN_24H_QUOTE_VOLUME = float(os.getenv("PRO_MIN_24H_QUOTE_VOLUME", "10000000
 PRO_ALLOWED_SYMBOLS = [s.strip().upper() for s in os.getenv("PRO_ALLOWED_SYMBOLS", "").split(",") if s.strip()]
 PRO_BLOCK_LOW_QUALITY_SYMBOLS = os.getenv("PRO_BLOCK_LOW_QUALITY_SYMBOLS", "true").lower() == "true"
 
+
+# AI V2 controlled adaptive intelligence
+AI_V2_ENABLED = os.getenv("AI_V2_ENABLED", "true").lower() == "true"
+AI_V2_LOOKBACK_TRADES = int(os.getenv("AI_V2_LOOKBACK_TRADES", "50"))
+AI_V2_MIN_SAMPLE = int(os.getenv("AI_V2_MIN_SAMPLE", "8"))
+AI_V2_BAD_SYMBOL_WINRATE = float(os.getenv("AI_V2_BAD_SYMBOL_WINRATE", "35"))
+AI_V2_BAD_HOUR_WINRATE = float(os.getenv("AI_V2_BAD_HOUR_WINRATE", "35"))
+AI_V2_REVIEW_SECONDS = int(os.getenv("AI_V2_REVIEW_SECONDS", "300"))
+AI_V2_AUTO_DEFENSIVE = os.getenv("AI_V2_AUTO_DEFENSIVE", "true").lower() == "true"
+AI_V2_BLOCK_BAD_SYMBOLS = os.getenv("AI_V2_BLOCK_BAD_SYMBOLS", "true").lower() == "true"
+AI_V2_BLOCK_BAD_HOURS = os.getenv("AI_V2_BLOCK_BAD_HOURS", "false").lower() == "true"
+
+AI_V2_STATE: Dict[str, Any] = {
+    "mode": "learning",
+    "last_review": None,
+    "bad_symbols": [],
+    "best_symbols": [],
+    "bad_hours_utc": [],
+    "best_hours_utc": [],
+    "recommendations": [],
+    "stats": {},
+    "task": None,
+}
+
 PRO_ENGINE_STATE: Dict[str, Any] = {
     "last_checks": {},
     "symbol_cooldowns": {},
@@ -971,9 +995,141 @@ def pro_loss_streak_guard():
     return {"allow": True, "reason": "loss streak ok", "loss_streak": streak}
 
 
+
+def ai_v2_rows():
+    rows = analytics_trade_rows() if "analytics_trade_rows" in globals() else []
+    closed = [r for r in rows if r.get("status") == "closed" and r.get("pnl") is not None]
+    return closed[:AI_V2_LOOKBACK_TRADES]
+
+
+def ai_v2_group_stats(rows, key):
+    stats = {}
+    for r in rows:
+        k = str(r.get(key, "UNKNOWN"))
+        stats.setdefault(k, {"trades": 0, "wins": 0, "losses": 0, "pnl": 0.0})
+        stats[k]["trades"] += 1
+        stats[k]["pnl"] += float(r.get("pnl") or 0)
+        if float(r.get("pnl") or 0) > 0:
+            stats[k]["wins"] += 1
+        elif float(r.get("pnl") or 0) < 0:
+            stats[k]["losses"] += 1
+    for k, v in stats.items():
+        counted = v["wins"] + v["losses"]
+        v["win_rate"] = (v["wins"] / counted * 100.0) if counted else 0.0
+    return stats
+
+
+def ai_v2_review():
+    if not AI_V2_ENABLED:
+        AI_V2_STATE.update({"mode": "disabled", "last_review": now_iso(), "recommendations": ["AI V2 disabled"]})
+        return AI_V2_STATE
+
+    rows = ai_v2_rows()
+    recommendations = []
+
+    if len(rows) < AI_V2_MIN_SAMPLE:
+        AI_V2_STATE.update({
+            "mode": "learning",
+            "last_review": now_iso(),
+            "stats": {"sample": len(rows), "need": AI_V2_MIN_SAMPLE},
+            "recommendations": ["Keep paper mode running. Need more closed trades before adapting."]
+        })
+        return AI_V2_STATE
+
+    wins = len([r for r in rows if r["pnl"] > 0])
+    losses = len([r for r in rows if r["pnl"] < 0])
+    total = wins + losses
+    win_rate = wins / total * 100.0 if total else 0
+    pnl = sum(float(r["pnl"]) for r in rows)
+
+    by_symbol = ai_v2_group_stats(rows, "ticker")
+    by_hour = ai_v2_group_stats(rows, "hour_utc")
+
+    bad_symbols = [s for s, st in by_symbol.items() if st["trades"] >= 3 and st["win_rate"] < AI_V2_BAD_SYMBOL_WINRATE]
+    best_symbols = [s for s, st in by_symbol.items() if st["trades"] >= 3 and st["win_rate"] >= 55 and st["pnl"] > 0]
+
+    bad_hours = [h for h, st in by_hour.items() if st["trades"] >= 3 and st["win_rate"] < AI_V2_BAD_HOUR_WINRATE]
+    best_hours = [h for h, st in by_hour.items() if st["trades"] >= 3 and st["win_rate"] >= 55 and st["pnl"] > 0]
+
+    mode = "normal"
+    if win_rate < 35 or pnl < 0:
+        mode = "defensive"
+        recommendations += [
+            "Defensive mode: keep SCANNER_MIN_QUALITY at 3.",
+            "Keep MTF_CONFIRM_ENABLED=true.",
+            "Avoid low-volume symbols and chop/range regimes."
+        ]
+    elif win_rate >= 55 and pnl > 0:
+        mode = "stable"
+        recommendations += [
+            "Performance is acceptable.",
+            "Do not increase risk until paper sample is much larger."
+        ]
+
+    if bad_symbols:
+        recommendations.append("Avoid bad symbols: " + ", ".join(bad_symbols[:10]))
+    if best_symbols:
+        recommendations.append("Best symbols so far: " + ", ".join(best_symbols[:10]))
+    if bad_hours:
+        recommendations.append("Avoid weak UTC hours: " + ", ".join(bad_hours[:10]))
+    if best_hours:
+        recommendations.append("Best UTC hours so far: " + ", ".join(best_hours[:10]))
+
+    AI_V2_STATE.update({
+        "mode": mode,
+        "last_review": now_iso(),
+        "bad_symbols": bad_symbols,
+        "best_symbols": best_symbols,
+        "bad_hours_utc": bad_hours,
+        "best_hours_utc": best_hours,
+        "recommendations": recommendations,
+        "stats": {
+            "sample": len(rows),
+            "wins": wins,
+            "losses": losses,
+            "win_rate": win_rate,
+            "pnl": pnl,
+            "by_symbol": by_symbol,
+            "by_hour_utc": by_hour,
+        }
+    })
+    return AI_V2_STATE
+
+
+def ai_v2_allows_trade(symbol: str):
+    if not AI_V2_ENABLED:
+        return True, "AI V2 disabled"
+
+    state = ai_v2_review()
+    symbol = symbol.upper()
+
+    if AI_V2_BLOCK_BAD_SYMBOLS and symbol in state.get("bad_symbols", []):
+        return False, f"AI V2 blocked bad symbol: {symbol}"
+
+    if AI_V2_BLOCK_BAD_HOURS:
+        hour = str(datetime.now(timezone.utc).hour)
+        if hour in state.get("bad_hours_utc", []):
+            return False, f"AI V2 blocked bad UTC hour: {hour}"
+
+    return True, "AI V2 ok"
+
+
+async def _ai_v2_loop():
+    while True:
+        try:
+            ai_v2_review()
+        except Exception as exc:
+            AI_V2_STATE["last_error"] = str(exc)
+        await asyncio.sleep(AI_V2_REVIEW_SECONDS)
+
+
 def pro_engine_check(symbol: str, signal: str):
     if not PRO_ENGINE_ENABLED:
         return {"allow": True, "reason": "pro engine disabled"}
+
+    ai_ok, ai_reason = ai_v2_allows_trade(symbol)
+    if not ai_ok:
+        return {"allow": False, "reason": ai_reason, "ai_v2": AI_V2_STATE}
 
     symbol = symbol.upper()
     checks = {}
@@ -1044,6 +1200,10 @@ def execute(payload: SignalPayload):
 
     if get_open_positions_count() >= MAX_CONCURRENT_POSITIONS:
         return {"approved": False, "reason": "max concurrent positions reached"}
+
+    ai_ok, ai_reason = ai_v2_allows_trade(payload.ticker)
+    if not ai_ok:
+        return {"approved": False, "reason": ai_reason, "ai_v2": AI_V2_STATE}
 
     adaptive_ok, adaptive_reason = adaptive_allows_new_trade(payload.ticker)
     if not adaptive_ok:
@@ -1961,6 +2121,8 @@ def safety_status():
         "pro_block_chop": PRO_BLOCK_CHOP,
         "pro_max_trades_per_hour": PRO_MAX_TRADES_PER_HOUR,
         "pro_min_24h_quote_volume": PRO_MIN_24H_QUOTE_VOLUME,
+        "ai_v2_enabled": AI_V2_ENABLED,
+        "ai_v2_mode": AI_V2_STATE.get("mode"),
     }
 
 
@@ -2511,6 +2673,33 @@ def pro_engine_manual_check(symbol: str, signal: str):
 
 
 
+
+@app.get("/ai-v2/status")
+def ai_v2_status():
+    return ai_v2_review()
+
+
+@app.post("/ai-v2/reset")
+def ai_v2_reset():
+    AI_V2_STATE.update({
+        "mode": "learning",
+        "last_review": None,
+        "bad_symbols": [],
+        "best_symbols": [],
+        "bad_hours_utc": [],
+        "best_hours_utc": [],
+        "recommendations": [],
+        "stats": {},
+    })
+    return {"ok": True, "reason": "AI V2 state reset"}
+
+
+@app.get("/ai-v2/recommendations")
+def ai_v2_recommendations():
+    state = ai_v2_review()
+    return {"mode": state.get("mode"), "recommendations": state.get("recommendations", []), "stats": state.get("stats", {})}
+
+
 @app.get("/dashboard", response_class=HTMLResponse)
 def dashboard():
     return """
@@ -2723,7 +2912,7 @@ def dashboard():
     </div>
 
     <div class="grid3">
-        <div class="card"><h3>PRO Engine</h3><pre id="proBox">Loading...</pre></div>
+        <div class="card"><h3>PRO Engine</h3><pre id="proBox">Loading...</pre></div><div class="card"><h3>AI V2 Brain</h3><pre id="aiV2Box">Loading...</pre></div>
         <div class="card"><h3>Scanner Status</h3><pre id="scannerBox">Loading...</pre></div>
         <div class="card"><h3>System Detail</h3><pre id="systemBox">Loading...</pre></div>
     </div>
@@ -2900,6 +3089,16 @@ async function loadAnalytics() {
         drawEquity(d.equity_curve || []);
     } catch(e) { drawEquity([]); }
 }
+async function loadAiV2() {
+    try {
+        const d = await getJson("/ai-v2/status");
+        const el = document.getElementById("aiV2Box");
+        if (el) el.textContent = JSON.stringify(d, null, 2);
+    } catch(e) {
+        const el = document.getElementById("aiV2Box");
+        if (el) el.textContent = "AI V2 unavailable: " + e.message;
+    }
+}
 async function loadSystem() {
     const [ws, safety, manager, adaptive, pro] = await Promise.allSettled([
         getJson("/futures/ws/status"), getJson("/safety/status"), getJson("/manager/status"), getJson("/adaptive/status"), getJson("/pro-engine/status")
@@ -2939,7 +3138,7 @@ async function emergencyStop(){ if(confirm("Emergency stop scanner/trading?")) a
 async function resumeSafety(){ await action("/safety/resume", "POST"); }
 async function closePosition(id){ if(confirm("Close this position?")) await action("/positions/close/" + id, "POST"); }
 async function refreshAll() {
-    await Promise.allSettled([loadRoot(), loadConfig(), loadSafety(), loadManager(), loadScanner(), loadPositions(), loadStats(), loadAnalytics(), loadSystem()]);
+    await Promise.allSettled([loadRoot(), loadConfig(), loadSafety(), loadManager(), loadScanner(), loadPositions(), loadStats(), loadAnalytics(), loadSystem(), loadAiV2()]);
     document.getElementById("clockBadge").textContent = new Date().toLocaleTimeString();
 }
 refreshAll();
@@ -2951,9 +3150,14 @@ setInterval(refreshAll, 5000);
 
 
 
+@app.on_event("startup")
+async def startup_ai_v2():
+    if AI_V2_ENABLED and AI_V2_STATE.get("task") is None:
+        AI_V2_STATE["task"] = asyncio.create_task(_ai_v2_loop())
+
 @app.get("/")
 def root():
-    return {"status": "ok", "service": "binance-spot-futures-bot-pro-final-command-center-v1", "time": now_iso()}
+    return {"status": "ok", "service": "binance-spot-futures-bot-pro-final-ai-v2", "time": now_iso()}
 
 
 @app.get("/config")

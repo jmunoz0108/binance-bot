@@ -1,18 +1,23 @@
-# Binance Bot Command Center V1
+# Binance Bot AI V2
 
-A polished dashboard upgrade:
-- Mission control buttons
-- Live position PnL
-- Unrealized + realized PnL
-- Win rate bar
-- Equity curve canvas
-- Scanner watchlist
-- PRO engine detail
-- Manager / adaptive / safety / websocket status
-- Auto refresh every 5 seconds
+Controlled adaptive intelligence upgrade:
+- reviews last closed trades
+- identifies bad symbols
+- identifies best symbols
+- identifies bad/best UTC hours
+- blocks bad symbols when enabled
+- can block bad hours if enabled
+- provides recommendations
+- dashboard AI V2 Brain panel
 
-Open:
-https://YOUR-DOMAIN/dashboard
+New endpoints:
+- GET /ai-v2/status
+- GET /ai-v2/recommendations
+- POST /ai-v2/reset
 
 Service:
-binance-spot-futures-bot-pro-final-command-center-v1
+binance-spot-futures-bot-pro-final-ai-v2
+
+Important:
+This is controlled adaptation, not unsafe random strategy mutation.
+Keep paper mode until you trust the results.
