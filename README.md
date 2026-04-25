@@ -1,15 +1,12 @@
-# Binance Bot Market Dashboard V1
+# Binance Bot 3D Dashboard V1
 
-Dashboard update:
-- removed AI V2 Brain panel
-- added Top Movers panel
-- added New Futures Listings panel
-- added Binance News panel
-
-New endpoints:
-- GET /market/top-movers
-- GET /market/new-listings
-- GET /market/news
+Redesigned dashboard:
+- no raw JSON for market panels
+- 3D/glass style dark UI
+- Top Movers as cards
+- New Futures Listings as cards
+- Binance News as cards
+- Live PnL / equity curve / watchlist / AI V3 / PRO engine
 
 Service:
-binance-spot-futures-bot-pro-final-market-dashboard-v1
+binance-spot-futures-bot-pro-final-3d-dashboard-v1

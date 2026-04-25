@@ -2998,6 +2998,7 @@ def market_news_endpoint(limit: int = 10):
     return market_news(limit)
 
 
+
 @app.get("/dashboard", response_class=HTMLResponse)
 def dashboard():
     return """
@@ -3007,480 +3008,208 @@ def dashboard():
     <title>Monster Bot Command Center</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
-        :root {
-            --bg0:#050712; --bg1:#080d19; --card:#0f172a; --card2:#111c31;
-            --line:#243145; --text:#e5e7eb; --muted:#94a3b8;
-            --green:#22c55e; --red:#ef4444; --yellow:#eab308; --blue:#38bdf8;
-            --purple:#a78bfa; --orange:#fb923c; --cyan:#22d3ee;
+        :root{
+            --bg:#050816; --panel:#0c1324; --panel2:#101a31; --glass:rgba(15,23,42,.72);
+            --line:rgba(148,163,184,.16); --text:#e5e7eb; --muted:#94a3b8;
+            --green:#22c55e; --red:#ef4444; --yellow:#facc15; --blue:#38bdf8; --purple:#a78bfa; --orange:#fb923c; --cyan:#22d3ee;
         }
-        * { box-sizing:border-box; }
-        body {
-            margin:0; color:var(--text);
-            font-family: Inter, Segoe UI, Arial, sans-serif;
+        *{box-sizing:border-box}
+        body{
+            margin:0; color:var(--text); font-family:Inter,Segoe UI,Arial,sans-serif; min-height:100vh;
             background:
-                radial-gradient(circle at 10% 0%, rgba(56,189,248,.22), transparent 28%),
-                radial-gradient(circle at 85% 10%, rgba(167,139,250,.20), transparent 30%),
-                linear-gradient(180deg,var(--bg0),var(--bg1));
-            min-height:100vh;
+              radial-gradient(circle at 12% 8%, rgba(34,211,238,.22), transparent 28%),
+              radial-gradient(circle at 80% 0%, rgba(167,139,250,.23), transparent 30%),
+              radial-gradient(circle at 50% 95%, rgba(34,197,94,.10), transparent 32%),
+              linear-gradient(140deg,#030712,#08111f 45%,#0b1020);
+            overflow-x:hidden;
         }
-        header {
-            padding:18px 24px; border-bottom:1px solid rgba(148,163,184,.18);
-            background:rgba(5,7,18,.72); backdrop-filter:blur(18px);
-            position:sticky; top:0; z-index:20;
+        body:before{
+            content:""; position:fixed; inset:0; pointer-events:none; opacity:.38;
+            background-image:linear-gradient(rgba(255,255,255,.035) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,.035) 1px,transparent 1px);
+            background-size:38px 38px;
+            mask-image:linear-gradient(to bottom,black,transparent 85%);
         }
-        .topbar { display:flex; align-items:center; justify-content:space-between; gap:16px; flex-wrap:wrap; }
-        h1 { margin:0; font-size:24px; letter-spacing:.2px; }
-        .sub { color:var(--muted); font-size:12px; margin-top:4px; }
-        .badge { padding:8px 11px; border-radius:999px; border:1px solid var(--line); background:rgba(15,23,42,.8); font-size:12px; color:#cbd5e1; }
-        .wrap { max-width:1600px; margin:auto; padding:18px; }
-        .hero {
-            display:grid; grid-template-columns: 1.3fr .7fr; gap:14px; margin-bottom:14px;
+        header{
+            position:sticky; top:0; z-index:50; padding:18px 24px; border-bottom:1px solid var(--line);
+            background:rgba(3,7,18,.72); backdrop-filter:blur(20px);
         }
-        @media(max-width:1000px){ .hero{ grid-template-columns:1fr; } }
-        .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(210px,1fr)); gap:14px; }
-        .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:14px; margin-top:14px; }
-        .grid3 { display:grid; grid-template-columns:1.1fr .9fr .9fr; gap:14px; margin-top:14px; }
-        @media(max-width:1100px){ .grid2,.grid3{ grid-template-columns:1fr; } }
-        .card {
-            background:linear-gradient(180deg,rgba(15,23,42,.94),rgba(13,20,34,.94));
-            border:1px solid rgba(148,163,184,.16);
-            border-radius:20px; padding:16px;
-            box-shadow:0 18px 55px rgba(0,0,0,.32);
+        .topbar{display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px}
+        h1{margin:0; font-size:25px; letter-spacing:.2px; text-shadow:0 0 26px rgba(56,189,248,.25)}
+        .sub{color:var(--muted); font-size:12px; margin-top:4px}
+        .badge{
+            display:inline-flex; align-items:center; gap:7px; padding:8px 12px; border-radius:999px;
+            border:1px solid var(--line); background:rgba(15,23,42,.74); color:#cbd5e1; font-size:12px;
+            box-shadow:inset 0 1px 0 rgba(255,255,255,.05);
         }
-        .card h3 {
-            margin:0 0 10px; color:var(--muted); font-size:12px; font-weight:800;
-            text-transform:uppercase; letter-spacing:.10em;
+        .wrap{max-width:1680px; margin:auto; padding:18px}
+        .hero{display:grid; grid-template-columns:1.35fr .65fr; gap:16px; margin-bottom:16px}
+        .grid{display:grid; grid-template-columns:repeat(auto-fit,minmax(215px,1fr)); gap:16px}
+        .grid2{display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-top:16px}
+        .grid3{display:grid; grid-template-columns:1fr 1fr 1fr; gap:16px; margin-top:16px}
+        @media(max-width:1100px){.hero,.grid2,.grid3{grid-template-columns:1fr}}
+        .card{
+            position:relative; background:linear-gradient(180deg,rgba(15,23,42,.86),rgba(9,14,26,.92));
+            border:1px solid var(--line); border-radius:24px; padding:18px;
+            box-shadow:0 24px 70px rgba(0,0,0,.38), inset 0 1px 0 rgba(255,255,255,.04);
+            overflow:hidden;
         }
-        .big { font-size:30px; font-weight:900; line-height:1; }
-        .small { color:var(--muted); font-size:12px; margin-top:6px; }
-        .green{color:var(--green)} .red{color:var(--red)} .yellow{color:var(--yellow)}
-        .blue{color:var(--blue)} .purple{color:var(--purple)} .orange{color:var(--orange)}
-        .kpi {
-            min-height:116px; position:relative; overflow:hidden;
+        .card:after{
+            content:""; position:absolute; inset:-1px; pointer-events:none; border-radius:24px;
+            background:linear-gradient(135deg,rgba(56,189,248,.16),transparent 35%,rgba(167,139,250,.12));
+            opacity:.55; mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0); -webkit-mask-composite:xor; mask-composite:exclude; padding:1px;
         }
-        .kpi:after {
-            content:""; position:absolute; right:-35px; top:-35px; width:105px; height:105px;
-            background:rgba(56,189,248,.08); border-radius:999px;
+        .card h3{
+            margin:0 0 12px; color:#b6c3d5; font-size:12px; font-weight:900; text-transform:uppercase; letter-spacing:.12em;
         }
-        button {
-            border:0; border-radius:13px; padding:10px 13px; margin:4px;
-            background:#2563eb; color:white; cursor:pointer; font-weight:800;
-            box-shadow:0 10px 25px rgba(37,99,235,.18);
+        .big{font-size:31px; font-weight:950; line-height:1}
+        .small{font-size:12px; color:var(--muted); margin-top:7px}
+        .green{color:var(--green)} .red{color:var(--red)} .yellow{color:var(--yellow)} .blue{color:var(--blue)} .purple{color:var(--purple)} .orange{color:var(--orange)}
+        .kpi{min-height:118px}
+        .kpi .orb{position:absolute; right:-30px; top:-30px; width:105px; height:105px; border-radius:50%; filter:blur(.2px); opacity:.2; background:var(--blue)}
+        button{
+            border:0; border-radius:14px; padding:10px 13px; margin:4px; background:#2563eb; color:white; cursor:pointer; font-weight:850;
+            box-shadow:0 12px 28px rgba(37,99,235,.22), inset 0 1px 0 rgba(255,255,255,.12);
         }
-        button:hover { filter:brightness(1.15); transform:translateY(-1px); }
-        button.gray { background:#334155; box-shadow:none; }
-        button.danger { background:#dc2626; }
-        button.good { background:#16a34a; }
-        button.warn { background:#ca8a04; }
-        .controls { display:flex; flex-wrap:wrap; gap:6px; }
-        .pill {
-            display:inline-flex; align-items:center; gap:5px; padding:5px 9px; border-radius:999px;
-            font-size:12px; font-weight:900; border:1px solid transparent;
+        button:hover{filter:brightness(1.15); transform:translateY(-1px)}
+        button.gray{background:#334155; box-shadow:none} button.danger{background:#dc2626} button.good{background:#16a34a} button.warn{background:#ca8a04}
+        .controls{display:flex; flex-wrap:wrap; gap:6px}
+        .pill{
+            display:inline-flex; align-items:center; gap:5px; padding:5px 9px; border-radius:999px; font-size:12px; font-weight:900;
+            border:1px solid transparent; white-space:nowrap;
         }
-        .pill.long,.pill.win,.pill.buy,.pill.open { color:var(--green); background:rgba(34,197,94,.13); border-color:rgba(34,197,94,.22);}
-        .pill.short,.pill.loss,.pill.sell,.pill.stop { color:var(--red); background:rgba(239,68,68,.13); border-color:rgba(239,68,68,.22);}
-        .pill.watch,.pill.neutral { color:var(--yellow); background:rgba(234,179,8,.12); border-color:rgba(234,179,8,.22);}
-        .pill.info { color:var(--blue); background:rgba(56,189,248,.12); border-color:rgba(56,189,248,.20);}
-        .scroll { overflow:auto; max-height:420px; border:1px solid rgba(148,163,184,.13); border-radius:14px; }
-        table { width:100%; border-collapse:collapse; }
-        th,td { padding:10px; border-bottom:1px solid rgba(148,163,184,.12); font-size:12px; text-align:left; vertical-align:top; white-space:nowrap; }
-        th { color:var(--muted); background:rgba(2,6,23,.55); position:sticky; top:0; z-index:1; }
-        tr:hover { background:rgba(56,189,248,.05); }
-        .section { margin:18px 0 10px; font-size:15px; font-weight:900; color:#dbeafe; }
-        pre {
-            margin:0; background:#020617; color:#cbd5e1; border:1px solid rgba(148,163,184,.14);
-            padding:12px; border-radius:14px; overflow:auto; max-height:380px; font-size:11px;
+        .pill.long,.pill.buy,.pill.win,.pill.open{color:var(--green); background:rgba(34,197,94,.14); border-color:rgba(34,197,94,.25)}
+        .pill.short,.pill.sell,.pill.loss,.pill.stop{color:var(--red); background:rgba(239,68,68,.14); border-color:rgba(239,68,68,.25)}
+        .pill.watch,.pill.neutral{color:var(--yellow); background:rgba(250,204,21,.12); border-color:rgba(250,204,21,.25)}
+        .pill.info{color:var(--blue); background:rgba(56,189,248,.12); border-color:rgba(56,189,248,.25)}
+        .section{margin:18px 0 10px; font-size:15px; font-weight:950; color:#dbeafe}
+        .scroll{overflow:auto; max-height:430px; border:1px solid rgba(148,163,184,.12); border-radius:16px}
+        table{width:100%; border-collapse:collapse}
+        th,td{padding:10px; border-bottom:1px solid rgba(148,163,184,.11); font-size:12px; text-align:left; white-space:nowrap}
+        th{color:#9fb0c6; background:rgba(2,6,23,.55); position:sticky; top:0; z-index:1}
+        tr:hover{background:rgba(56,189,248,.055)}
+        canvas{width:100%; height:225px; background:rgba(2,6,23,.25); border-radius:16px; border:1px solid rgba(148,163,184,.12)}
+        .meter{height:8px; background:#1e293b; border-radius:999px; overflow:hidden; margin-top:10px}.meter>div{height:100%; width:0%; background:linear-gradient(90deg,var(--red),var(--yellow),var(--green))}
+        .dot{width:10px;height:10px;border-radius:50%;background:var(--yellow);box-shadow:0 0 18px currentColor}.dot.green{background:var(--green);color:var(--green)}.dot.red{background:var(--red);color:var(--red)}
+        .health{display:flex;align-items:center;gap:10px;margin-top:13px}
+        .marketGrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px}
+        .coinCard,.newsCard{
+            background:linear-gradient(180deg,rgba(2,6,23,.48),rgba(15,23,42,.72)); border:1px solid rgba(148,163,184,.13);
+            border-radius:18px; padding:13px; position:relative; overflow:hidden;
         }
-        canvas { width:100%; height:220px; background:rgba(2,6,23,.28); border-radius:15px; border:1px solid rgba(148,163,184,.12); }
-        .health {
-            display:flex; align-items:center; gap:10px; margin-top:12px;
-        }
-        .dot { width:10px; height:10px; border-radius:50%; background:var(--yellow); box-shadow:0 0 18px currentColor; }
-        .dot.green { background:var(--green); color:var(--green); }
-        .dot.red { background:var(--red); color:var(--red); }
-        .meter { height:8px; background:#1e293b; border-radius:99px; overflow:hidden; margin-top:10px; }
-        .meter > div { height:100%; background:linear-gradient(90deg,var(--red),var(--yellow),var(--green)); width:0%; }
-        a { color:var(--blue); text-decoration:none; }
-        .two { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
-        @media(max-width:700px){ .two{grid-template-columns:1fr;} }
+        .coinCard:before{content:"";position:absolute;right:-25px;top:-25px;width:80px;height:80px;border-radius:50%;background:rgba(56,189,248,.09)}
+        .coinTop{display:flex;justify-content:space-between;align-items:center;gap:8px}
+        .sym{font-size:16px;font-weight:950}.price{font-size:12px;color:#cbd5e1}.chg{font-size:18px;font-weight:950;margin-top:8px}
+        .vol{font-size:11px;color:var(--muted);margin-top:6px}
+        .tabs{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px}
+        .tab{padding:7px 10px;border-radius:999px;background:rgba(51,65,85,.65);color:#cbd5e1;font-size:12px;cursor:pointer;font-weight:850}
+        .tab.active{background:rgba(56,189,248,.18);color:var(--blue);border:1px solid rgba(56,189,248,.22)}
+        .newsTitle{font-weight:850;line-height:1.25}.newsDate{font-size:11px;color:var(--muted);margin-top:7px}
+        pre{background:#020617;color:#cbd5e1;border:1px solid rgba(148,163,184,.12);padding:12px;border-radius:15px;overflow:auto;max-height:360px;font-size:11px}
+        a{color:var(--blue);text-decoration:none}
     </style>
 </head>
 <body>
 <header>
-    <div class="topbar">
-        <div>
-            <h1>Monster Bot Command Center</h1>
-            <div class="sub">Live Manager • PRO Engine • Scanner • PnL • Watchlist • Safety</div>
-        </div>
-        <div>
-            <span class="badge" id="serviceBadge">Loading service...</span>
-            <span class="badge" id="clockBadge"></span>
-        </div>
-    </div>
+  <div class="topbar">
+    <div><h1>Monster Bot Command Center</h1><div class="sub">Live trading brain • PRO engine • AI V3 confidence • Market intelligence</div></div>
+    <div><span class="badge" id="serviceBadge">Loading...</span><span class="badge" id="clockBadge"></span></div>
+  </div>
 </header>
 
 <div class="wrap">
-    <div class="hero">
-        <div class="card">
-            <h3>Mission Control</h3>
-            <div class="controls">
-                <button class="good" onclick="startScanner()">Start Scanner</button>
-                <button class="gray" onclick="stopScanner()">Stop Scanner</button>
-                <button onclick="scanOnce()">Scan Once</button>
-                <button onclick="refreshDiscovery()">Refresh Symbols</button>
-                <button onclick="startManager()">Start Manager</button>
-                <button class="gray" onclick="stopManager()">Stop Manager</button>
-                <button onclick="startWs()">Start Futures WS</button>
-                <button class="gray" onclick="stopWs()">Stop Futures WS</button>
-                <button onclick="syncFutures()">Sync Futures</button>
-                <button class="warn" onclick="resetPro()">Reset PRO Engine</button>
-                <button class="danger" onclick="emergencyStop()">Emergency Stop</button>
-                <button class="good" onclick="resumeSafety()">Resume</button>
-                <button class="gray" onclick="refreshAll()">Refresh</button>
-                <a href="/docs" target="_blank"><button class="gray">API Docs</button></a>
-            </div>
-            <div class="health">
-                <span id="healthDot" class="dot"></span>
-                <span id="healthText" class="small">Checking system health...</span>
-            </div>
-            <div id="controlResult" class="small"></div>
-        </div>
-        <div class="card">
-            <h3>Recommended Fast Trail Settings</h3>
-            <div class="two">
-                <div><span class="pill info">BE 0.50R</span><div class="small">Fast break-even protection</div></div>
-                <div><span class="pill info">Trail 3 bars</span><div class="small">TP follows price action</div></div>
-                <div><span class="pill info">Manager 10s</span><div class="small">Faster live checks</div></div>
-                <div><span class="pill info">PRO filter</span><div class="small">Blocks chop / low quality</div></div>
-            </div>
-        </div>
+  <div class="hero">
+    <div class="card">
+      <h3>Mission Control</h3>
+      <div class="controls">
+        <button class="good" onclick="startScanner()">Start Scanner</button><button class="gray" onclick="stopScanner()">Stop Scanner</button>
+        <button onclick="scanOnce()">Scan Once</button><button onclick="refreshDiscovery()">Refresh Symbols</button>
+        <button onclick="startManager()">Start Manager</button><button class="gray" onclick="stopManager()">Stop Manager</button>
+        <button onclick="startWs()">Start Futures WS</button><button class="gray" onclick="stopWs()">Stop Futures WS</button>
+        <button onclick="syncFutures()">Sync Futures</button><button class="warn" onclick="resetPro()">Reset PRO</button>
+        <button class="danger" onclick="emergencyStop()">Emergency Stop</button><button class="good" onclick="resumeSafety()">Resume</button>
+        <button class="gray" onclick="refreshAll()">Refresh</button><a href="/docs" target="_blank"><button class="gray">API Docs</button></a>
+      </div>
+      <div class="health"><span id="healthDot" class="dot"></span><span id="healthText" class="small">Checking system...</span></div>
+      <div id="controlResult" class="small"></div>
     </div>
+    <div class="card">
+      <h3>Fast Trail System</h3>
+      <div class="marketGrid">
+        <div class="coinCard"><div class="sym">BE 0.50R</div><div class="small">Fast break-even protection</div></div>
+        <div class="coinCard"><div class="sym">3-Bar Trail</div><div class="small">TP follows price action</div></div>
+        <div class="coinCard"><div class="sym">10s Manager</div><div class="small">Near-live position checks</div></div>
+        <div class="coinCard"><div class="sym">AI V3</div><div class="small">Confidence filter</div></div>
+      </div>
+    </div>
+  </div>
 
-    <div class="grid">
-        <div class="card kpi"><h3>Server</h3><div id="serverStatus" class="big yellow">...</div><div id="serverLine" class="small"></div></div>
-        <div class="card kpi"><h3>Execution</h3><div id="executionStatus" class="big yellow">...</div><div id="riskLine" class="small"></div></div>
-        <div class="card kpi"><h3>Scanner</h3><div id="scannerStatus" class="big yellow">...</div><div id="scannerLine" class="small"></div></div>
-        <div class="card kpi"><h3>Live Manager</h3><div id="managerStatus" class="big yellow">...</div><div id="managerLine" class="small"></div></div>
-        <div class="card kpi"><h3>Safety</h3><div id="safetyStatus" class="big yellow">...</div><div id="safetyLine" class="small"></div></div>
-    </div>
+  <div class="grid">
+    <div class="card kpi"><span class="orb"></span><h3>Server</h3><div id="serverStatus" class="big yellow">...</div><div id="serverLine" class="small"></div></div>
+    <div class="card kpi"><span class="orb"></span><h3>Execution</h3><div id="executionStatus" class="big yellow">...</div><div id="riskLine" class="small"></div></div>
+    <div class="card kpi"><span class="orb"></span><h3>Scanner</h3><div id="scannerStatus" class="big yellow">...</div><div id="scannerLine" class="small"></div></div>
+    <div class="card kpi"><span class="orb"></span><h3>Live Manager</h3><div id="managerStatus" class="big yellow">...</div><div id="managerLine" class="small"></div></div>
+    <div class="card kpi"><span class="orb"></span><h3>Safety</h3><div id="safetyStatus" class="big yellow">...</div><div id="safetyLine" class="small"></div></div>
+  </div>
 
-    <div class="grid" style="margin-top:14px;">
-        <div class="card kpi"><h3>Open Positions</h3><div id="openCount" class="big blue">0</div><div class="small">Live tracked trades</div></div>
-        <div class="card kpi"><h3>Unrealized PnL</h3><div id="unrealizedPnl" class="big yellow">$0.00</div><div class="small">Live estimate</div></div>
-        <div class="card kpi"><h3>Realized PnL</h3><div id="realizedPnl" class="big yellow">$0.00</div><div class="small">Closed trades estimate</div></div>
-        <div class="card kpi"><h3>Win Rate</h3><div id="winRate" class="big purple">0%</div><div class="meter"><div id="winBar"></div></div><div id="wlLine" class="small"></div></div>
-        <div class="card kpi"><h3>Watchlist</h3><div id="watchCount" class="big orange">0</div><div class="small">Interesting scanner setups</div></div>
-    </div>
+  <div class="grid" style="margin-top:16px">
+    <div class="card kpi"><h3>Open Positions</h3><div id="openCount" class="big blue">0</div><div class="small">Live tracked trades</div></div>
+    <div class="card kpi"><h3>Unrealized PnL</h3><div id="unrealizedPnl" class="big yellow">$0.00</div><div class="small">Live estimate</div></div>
+    <div class="card kpi"><h3>Realized PnL</h3><div id="realizedPnl" class="big yellow">$0.00</div><div class="small">Closed trades estimate</div></div>
+    <div class="card kpi"><h3>Win Rate</h3><div id="winRate" class="big purple">0%</div><div class="meter"><div id="winBar"></div></div><div id="wlLine" class="small"></div></div>
+    <div class="card kpi"><h3>Watchlist</h3><div id="watchCount" class="big orange">0</div><div class="small">Interesting setups</div></div>
+  </div>
 
-    <div class="grid2">
-        <div class="card">
-            <h3>Equity Curve</h3>
-            <canvas id="equityCanvas" width="900" height="260"></canvas>
-        </div>
-        <div class="card">
-            <h3>Open Positions Live</h3>
-            <div class="scroll">
-                <table>
-                    <thead><tr><th>Status</th><th>Symbol</th><th>Side</th><th>Entry</th><th>Mark</th><th>Stop</th><th>PnL</th><th>R</th><th>Qty</th><th>Action</th></tr></thead>
-                    <tbody id="positionsBody"><tr><td colspan="10">Loading...</td></tr></tbody>
-                </table>
-            </div>
-        </div>
-    </div>
+  <div class="grid2">
+    <div class="card"><h3>Equity Curve</h3><canvas id="equityCanvas" width="900" height="260"></canvas></div>
+    <div class="card"><h3>Open Positions Live</h3><div class="scroll"><table><thead><tr><th>Status</th><th>Symbol</th><th>Side</th><th>Entry</th><th>Mark</th><th>Stop</th><th>PnL</th><th>R</th><th>Qty</th><th>Action</th></tr></thead><tbody id="positionsBody"><tr><td colspan="10">Loading...</td></tr></tbody></table></div></div>
+  </div>
 
-    <div class="grid2">
-        <div class="card">
-            <h3>Scanner Watchlist / Near Setups</h3>
-            <div class="scroll">
-                <table>
-                    <thead><tr><th>Symbol</th><th>Signal</th><th>Structure</th><th>Quality</th><th>Orderbook</th><th>Reason</th></tr></thead>
-                    <tbody id="watchBody"><tr><td colspan="6">Loading...</td></tr></tbody>
-                </table>
-            </div>
-        </div>
-        <div class="card">
-            <h3>Closed Trades / PnL</h3>
-            <div class="scroll">
-                <table>
-                    <thead><tr><th>Symbol</th><th>Side</th><th>Entry</th><th>Exit</th><th>Qty</th><th>PnL</th><th>Time</th></tr></thead>
-                    <tbody id="pnlBody"><tr><td colspan="7">Loading...</td></tr></tbody>
-                </table>
-            </div>
-        </div>
-    </div>
+  <div class="section">Market Intelligence</div>
+  <div class="grid3">
+    <div class="card"><h3>Top Movers</h3><div class="tabs"><span class="tab active" onclick="renderMovers('gainers')">Gainers</span><span class="tab" onclick="renderMovers('losers')">Losers</span><span class="tab" onclick="renderMovers('volume')">Volume</span></div><div id="topMoversCards" class="marketGrid"></div></div>
+    <div class="card"><h3>New Futures Listings</h3><div id="newListingsCards" class="marketGrid"></div></div>
+    <div class="card"><h3>Binance News</h3><div id="newsCards"></div></div>
+  </div>
 
-    <div class="grid3">
-        <div class="card"><h3>PRO Engine</h3><pre id="proBox">Loading...</pre></div><div class="card"><h3>Top Movers</h3><pre id="topMoversBox">Loading...</pre></div><div class="card"><h3>New Futures Listings</h3><pre id="newListingsBox">Loading...</pre></div><div class="card"><h3>Binance News</h3><pre id="newsBox">Loading...</pre></div><div class="card"><h3>AI V3 Confidence Brain</h3><pre id="aiV3Box">Loading...</pre></div>
-        <div class="card"><h3>Scanner Status</h3><pre id="scannerBox">Loading...</pre></div>
-        <div class="card"><h3>System Detail</h3><pre id="systemBox">Loading...</pre></div>
-    </div>
+  <div class="grid2">
+    <div class="card"><h3>Scanner Watchlist / Near Setups</h3><div class="scroll"><table><thead><tr><th>Symbol</th><th>Signal</th><th>Structure</th><th>Quality</th><th>Orderbook</th><th>Reason</th></tr></thead><tbody id="watchBody"><tr><td colspan="6">Loading...</td></tr></tbody></table></div></div>
+    <div class="card"><h3>Closed Trades / PnL</h3><div class="scroll"><table><thead><tr><th>Symbol</th><th>Side</th><th>Entry</th><th>Exit</th><th>Qty</th><th>PnL</th><th>Time</th></tr></thead><tbody id="pnlBody"><tr><td colspan="7">Loading...</td></tr></tbody></table></div></div>
+  </div>
+
+  <div class="grid3">
+    <div class="card"><h3>PRO Engine</h3><pre id="proBox">Loading...</pre></div>
+    <div class="card"><h3>AI V3 Confidence Brain</h3><pre id="aiV3Box">Loading...</pre></div>
+    <div class="card"><h3>System Detail</h3><pre id="systemBox">Loading...</pre></div>
+  </div>
 </div>
 
 <script>
-async function getJson(url, opts={}) {
-    const res = await fetch(url, opts);
-    if (!res.ok) throw new Error(res.status + " " + await res.text());
-    return await res.json();
-}
-function money(n) {
-    if (n === null || n === undefined || isNaN(n)) return "$0.00";
-    return "$" + Number(n).toFixed(4);
-}
-function fmt(n) {
-    if (n === null || n === undefined) return "";
-    if (typeof n === "number") return Number(n).toFixed(6).replace(/0+$/,'').replace(/\.$/,'');
-    return n;
-}
-function pill(txt, cls="neutral") { return `<span class="pill ${cls}">${txt ?? ""}</span>`; }
-
-function drawEquity(points) {
-    const canvas = document.getElementById("equityCanvas");
-    if (!canvas) return;
-    const ctx = canvas.getContext("2d");
-    const w = canvas.width, h = canvas.height;
-    ctx.clearRect(0,0,w,h);
-    ctx.fillStyle = "rgba(2,6,23,.25)";
-    ctx.fillRect(0,0,w,h);
-
-    ctx.strokeStyle = "rgba(148,163,184,.18)";
-    ctx.lineWidth = 1;
-    for (let i=0;i<5;i++) {
-        const y = 20 + i*(h-40)/4;
-        ctx.beginPath(); ctx.moveTo(20,y); ctx.lineTo(w-20,y); ctx.stroke();
-    }
-
-    if (!points || points.length === 0) {
-        ctx.fillStyle = "#94a3b8"; ctx.font = "16px Arial";
-        ctx.fillText("No closed trades yet", 30, 45);
-        return;
-    }
-
-    const vals = points.map(p => Number(p.equity || 0));
-    let min = Math.min(...vals), max = Math.max(...vals);
-    if (min === max) { min -= 1; max += 1; }
-
-    const xStep = (w-50) / Math.max(points.length-1, 1);
-    function y(v){ return h-25 - ((v-min)/(max-min))*(h-55); }
-
-    ctx.beginPath();
-    vals.forEach((v,i) => {
-        const x = 25 + i*xStep;
-        if (i===0) ctx.moveTo(x,y(v)); else ctx.lineTo(x,y(v));
-    });
-    ctx.strokeStyle = vals[vals.length-1] >= 0 ? "#22c55e" : "#ef4444";
-    ctx.lineWidth = 3;
-    ctx.stroke();
-
-    ctx.fillStyle = "#e5e7eb"; ctx.font = "12px Arial";
-    ctx.fillText("Equity: " + money(vals[vals.length-1]), 28, 22);
-}
-
-async function loadRoot() {
-    const d = await getJson("/");
-    document.getElementById("serverStatus").textContent = d.status || "unknown";
-    document.getElementById("serverStatus").className = "big green";
-    document.getElementById("serverLine").textContent = d.service || "";
-    document.getElementById("serviceBadge").textContent = d.service || "service";
-}
-async function loadConfig() {
-    const d = await getJson("/config");
-    document.getElementById("executionStatus").textContent = d.execution_enabled ? "LIVE ON" : "SAFE";
-    document.getElementById("executionStatus").className = d.execution_enabled ? "big red" : "big green";
-    document.getElementById("riskLine").textContent = `Default ${d.default_exchange} | Risk ${d.max_risk_pct_per_trade}% | Trail ${d.pa_trail_enabled}`;
-}
-async function loadSafety() {
-    const d = await getJson("/safety/status");
-    document.getElementById("safetyStatus").textContent = d.emergency_stop ? "STOPPED" : "OK";
-    document.getElementById("safetyStatus").className = d.emergency_stop ? "big red" : "big green";
-    document.getElementById("safetyLine").textContent = d.session_reason || "";
-    return d;
-}
-async function loadManager() {
-    const d = await getJson("/manager/status");
-    document.getElementById("managerStatus").textContent = d.running ? "RUNNING" : "OFF";
-    document.getElementById("managerStatus").className = d.running ? "big green" : "big yellow";
-    document.getElementById("managerLine").textContent = `Every ${d.sleep_seconds}s | PA Trail ${d.pa_trailing_enabled} | Last ${d.last_run || "never"}`;
-    return d;
-}
-async function loadScanner() {
-    const d = await getJson("/scanner/status");
-    document.getElementById("scannerStatus").textContent = d.running ? "RUNNING" : "OFF";
-    document.getElementById("scannerStatus").className = d.running ? "big green" : "big yellow";
-    document.getElementById("scannerLine").textContent = `${d.symbols?.length || 0} symbols | ${d.exchange} | ${d.interval}`;
-    document.getElementById("scannerBox").textContent = JSON.stringify(d, null, 2);
-
-    const interested = [];
-    (d.last_results || []).forEach(r => {
-        const checks = r.checks || {};
-        const q = r.quality_score ?? r.elite_score ?? Math.max(checks.long_quality || 0, checks.short_quality || 0);
-        if (r.signal || q >= 1 || ["bullish","bearish"].includes(r.structure)) interested.push({...r, q});
-    });
-    document.getElementById("watchCount").textContent = interested.length;
-    const body = document.getElementById("watchBody");
-    if (!interested.length) {
-        body.innerHTML = '<tr><td colspan="6" class="small">No interesting setups right now</td></tr>';
-    } else {
-        body.innerHTML = interested.slice(0, 80).map(r => {
-            const ob = r.orderbook || {};
-            const sigCls = r.signal === "long" ? "long" : r.signal === "short" ? "short" : "watch";
-            return `<tr>
-                <td>${r.symbol || ""}</td>
-                <td>${pill(r.signal || "watch", sigCls)}</td>
-                <td>${r.structure || ""}</td>
-                <td>${r.q ?? ""}</td>
-                <td>${ob.pressure || ""} ${ob.ratio ? "(" + Number(ob.ratio).toFixed(2) + ")" : ""}</td>
-                <td>${r.reason || r.execution?.reason || ""}</td>
-            </tr>`;
-        }).join("");
-    }
-}
-async function loadPositions() {
-    const d = await getJson("/positions/live");
-    const rows = d.rows || [];
-    document.getElementById("openCount").textContent = rows.length;
-    const unreal = rows.reduce((a,p)=>a + Number(p.unrealized_pnl || 0), 0);
-    document.getElementById("unrealizedPnl").textContent = money(unreal);
-    document.getElementById("unrealizedPnl").className = unreal >= 0 ? "big green" : "big red";
-
-    const body = document.getElementById("positionsBody");
-    if (!rows.length) {
-        body.innerHTML = '<tr><td colspan="10" class="small">No open positions</td></tr>';
-        return;
-    }
-    body.innerHTML = rows.map(p => `<tr>
-        <td>${pill(p.status, "open")}</td>
-        <td>${p.ticker}</td>
-        <td>${pill(p.signal, p.signal)}</td>
-        <td>${fmt(p.entry_price)}</td>
-        <td>${fmt(p.mark_price)}</td>
-        <td>${fmt(p.stop_price)}</td>
-        <td class="${(p.unrealized_pnl || 0) >= 0 ? "green" : "red"}">${money(p.unrealized_pnl || 0)}</td>
-        <td>${fmt(p.current_r)}</td>
-        <td>${fmt(p.qty)}</td>
-        <td><button class="danger" onclick="closePosition('${p.id}')">Close</button></td>
-    </tr>`).join("");
-}
-async function loadStats() {
-    const d = await getJson("/dashboard/stats");
-    const s = d.summary || {};
-    document.getElementById("realizedPnl").textContent = money(s.realized_pnl || 0);
-    document.getElementById("realizedPnl").className = (s.realized_pnl || 0) >= 0 ? "big green" : "big red";
-    document.getElementById("winRate").textContent = Number(s.win_rate || 0).toFixed(1) + "%";
-    document.getElementById("winBar").style.width = Math.min(100, Math.max(0, s.win_rate || 0)) + "%";
-    document.getElementById("wlLine").textContent = `W ${s.wins || 0} | L ${s.losses || 0} | BE ${s.breakeven || 0}`;
-
-    const body = document.getElementById("pnlBody");
-    const rows = d.pnl_rows || [];
-    if (!rows.length) {
-        body.innerHTML = '<tr><td colspan="7" class="small">No closed trades with PnL yet</td></tr>';
-    } else {
-        body.innerHTML = rows.slice(0,80).map(r => `<tr>
-            <td>${r.ticker}</td><td>${pill(r.signal, r.signal)}</td>
-            <td>${fmt(r.entry_price)}</td><td>${fmt(r.close_price)}</td><td>${fmt(r.qty)}</td>
-            <td class="${(r.pnl || 0) >= 0 ? "green" : "red"}">${money(r.pnl)}</td><td>${r.created_at || ""}</td>
-        </tr>`).join("");
-    }
-}
-async function loadAnalytics() {
-    try {
-        const d = await getJson("/analytics/summary");
-        drawEquity(d.equity_curve || []);
-    } catch(e) { drawEquity([]); }
-}
-async function loadAiV3() {
-    try {
-        const d = await getJson("/ai-v3/status");
-        const el = document.getElementById("aiV3Box");
-        if (el) el.textContent = JSON.stringify(d, null, 2);
-    } catch(e) {
-        const el = document.getElementById("aiV3Box");
-        if (el) el.textContent = "AI V3 unavailable: " + e.message;
-    }
-}
-async function loadAiV2() {
-    try {
-        const d = await getJson("/ai-v2/status");
-        const el = document.getElementById("aiV2Box");
-        if (el) el.textContent = JSON.stringify(d, null, 2);
-    } catch(e) {
-        const el = document.getElementById("aiV2Box");
-        if (el) el.textContent = "AI V2 unavailable: " + e.message;
-    }
-}
-
-async function loadMarketIntel() {
-    try {
-        const [movers, listings, news] = await Promise.allSettled([
-            getJson("/market/top-movers?limit=8"),
-            getJson("/market/new-listings?limit=8"),
-            getJson("/market/news?limit=6")
-        ]);
-
-        const moversBox = document.getElementById("topMoversBox");
-        if (moversBox) {
-            const d = movers.value || {};
-            moversBox.textContent = JSON.stringify({
-                top_gainers: d.gainers || [],
-                top_losers: d.losers || [],
-                top_volume: d.volume || []
-            }, null, 2);
-        }
-
-        const listingsBox = document.getElementById("newListingsBox");
-        if (listingsBox) listingsBox.textContent = JSON.stringify(listings.value || {}, null, 2);
-
-        const newsBox = document.getElementById("newsBox");
-        if (newsBox) newsBox.textContent = JSON.stringify(news.value || {}, null, 2);
-    } catch(e) {
-        const moversBox = document.getElementById("topMoversBox");
-        if (moversBox) moversBox.textContent = "Market intel unavailable: " + e.message;
-    }
-}
-
-async function loadSystem() {
-    const [ws, safety, manager, adaptive, pro] = await Promise.allSettled([
-        getJson("/futures/ws/status"), getJson("/safety/status"), getJson("/manager/status"), getJson("/adaptive/status"), getJson("/pro-engine/status")
-    ]);
-    document.getElementById("systemBox").textContent = JSON.stringify({
-        websocket: ws.value || ws.reason?.message,
-        safety: safety.value || safety.reason?.message,
-        manager: manager.value || manager.reason?.message,
-        adaptive: adaptive.value || adaptive.reason?.message
-    }, null, 2);
-    document.getElementById("proBox").textContent = JSON.stringify(pro.value || pro.reason?.message, null, 2);
-
-    const healthy = (safety.value && !safety.value.emergency_stop) && (manager.value && manager.value.running);
-    document.getElementById("healthDot").className = healthy ? "dot green" : "dot red";
-    document.getElementById("healthText").textContent = healthy ? "System healthy: manager online and safety OK" : "Check safety/manager status";
-}
-async function action(url, method) {
-    try {
-        const d = await getJson(url, {method});
-        document.getElementById("controlResult").textContent = JSON.stringify(d).slice(0, 600);
-        setTimeout(refreshAll, 700);
-    } catch(e) {
-        document.getElementById("controlResult").textContent = e.message;
-    }
-}
-async function startScanner(){ await action("/scanner/start", "POST"); }
-async function stopScanner(){ await action("/scanner/stop", "POST"); }
-async function scanOnce(){ await action("/scanner/scan-once", "POST"); }
-async function refreshDiscovery(){ await action("/scanner/discover-refresh", "POST"); }
-async function startManager(){ await action("/manager/start", "POST"); }
-async function stopManager(){ await action("/manager/stop", "POST"); }
-async function startWs(){ await action("/futures/ws/start", "POST"); }
-async function stopWs(){ await action("/futures/ws/stop", "POST"); }
-async function syncFutures(){ await action("/futures/sync-open", "POST"); }
-async function resetPro(){ await action("/pro-engine/reset", "POST"); }
-async function emergencyStop(){ if(confirm("Emergency stop scanner/trading?")) await action("/safety/emergency-stop?reason=dashboard", "POST"); }
-async function resumeSafety(){ await action("/safety/resume", "POST"); }
-async function closePosition(id){ if(confirm("Close this position?")) await action("/positions/close/" + id, "POST"); }
-async function refreshAll() {
-    await Promise.allSettled([loadRoot(), loadConfig(), loadSafety(), loadManager(), loadScanner(), loadPositions(), loadStats(), loadAnalytics(), loadSystem(), loadMarketIntel(), loadAiV3(), loadMarketIntel()]);
-    document.getElementById("clockBadge").textContent = new Date().toLocaleTimeString();
-}
-refreshAll();
-setInterval(refreshAll, 5000);
+let moversData = {};
+let moversMode = "gainers";
+async function getJson(url, opts={}){const r=await fetch(url,opts);if(!r.ok)throw new Error(r.status+" "+await r.text());return await r.json();}
+function money(n){if(n===null||n===undefined||isNaN(n))return "$0.00";return "$"+Number(n).toFixed(4)}
+function fmt(n){if(n===null||n===undefined)return "";if(typeof n==="number")return Number(n).toFixed(6).replace(/0+$/,"").replace(/\.$/,"");return n}
+function pill(txt,cls="neutral"){return `<span class="pill ${cls}">${txt??""}</span>`}
+function compactVol(n){n=Number(n||0); if(n>=1e9)return (n/1e9).toFixed(2)+"B"; if(n>=1e6)return (n/1e6).toFixed(1)+"M"; if(n>=1e3)return (n/1e3).toFixed(1)+"K"; return n.toFixed(0);}
+function drawEquity(points){const c=document.getElementById("equityCanvas");if(!c)return;const x=c.getContext("2d"),w=c.width,h=c.height;x.clearRect(0,0,w,h);x.fillStyle="rgba(2,6,23,.25)";x.fillRect(0,0,w,h);x.strokeStyle="rgba(148,163,184,.18)";for(let i=0;i<5;i++){let y=20+i*(h-40)/4;x.beginPath();x.moveTo(20,y);x.lineTo(w-20,y);x.stroke()}if(!points||!points.length){x.fillStyle="#94a3b8";x.font="16px Arial";x.fillText("No closed trades yet",30,45);return}const vals=points.map(p=>Number(p.equity||0));let mn=Math.min(...vals),mx=Math.max(...vals);if(mn===mx){mn-=1;mx+=1}const step=(w-50)/Math.max(points.length-1,1);function yy(v){return h-25-((v-mn)/(mx-mn))*(h-55)}x.beginPath();vals.forEach((v,i)=>{let xx=25+i*step;if(i===0)x.moveTo(xx,yy(v));else x.lineTo(xx,yy(v))});x.strokeStyle=vals.at(-1)>=0?"#22c55e":"#ef4444";x.lineWidth=3;x.stroke();x.fillStyle="#e5e7eb";x.font="12px Arial";x.fillText("Equity: "+money(vals.at(-1)),28,22)}
+function renderMovers(mode){moversMode=mode;document.querySelectorAll(".tab").forEach(t=>t.classList.remove("active"));[...document.querySelectorAll(".tab")].find(t=>t.textContent.toLowerCase().includes(mode==="gainers"?"gainers":mode==="losers"?"losers":"volume"))?.classList.add("active");const box=document.getElementById("topMoversCards");const rows=(moversData[mode]||[]).slice(0,8);box.innerHTML=rows.map(r=>{const pos=Number(r.price_change_percent)>=0;return `<div class="coinCard"><div class="coinTop"><div class="sym">${r.symbol}</div>${pill(pos?"UP":"DOWN",pos?"long":"short")}</div><div class="chg ${pos?"green":"red"}">${pos?"+":""}${Number(r.price_change_percent).toFixed(2)}%</div><div class="price">Last: ${fmt(r.last_price)}</div><div class="vol">24h Volume: ${compactVol(r.quote_volume)}</div></div>`}).join("")||'<div class="small">No movers loaded</div>'}
+function renderListings(rows){const box=document.getElementById("newListingsCards");box.innerHTML=(rows||[]).slice(0,8).map(r=>`<div class="coinCard"><div class="coinTop"><div class="sym">${r.symbol}</div>${pill("NEW","info")}</div><div class="price">Base: ${r.base_asset}</div><div class="vol">Onboard: ${r.onboard_date || "n/a"}</div></div>`).join("")||'<div class="small">No listing data</div>'}
+function renderNews(rows){const box=document.getElementById("newsCards");box.innerHTML=(rows||[]).slice(0,6).map(r=>`<div class="newsCard" style="margin-bottom:10px"><div class="newsTitle"><a href="${r.url}" target="_blank">${r.title||"Announcement"}</a></div><div class="newsDate">${r.release_date||""}</div></div>`).join("")||'<div class="small">News unavailable right now</div>'}
+async function loadRoot(){const d=await getJson("/");serverStatus.textContent=d.status||"unknown";serverStatus.className="big green";serverLine.textContent=d.service||"";serviceBadge.textContent=d.service||"service"}
+async function loadConfig(){const d=await getJson("/config");executionStatus.textContent=d.execution_enabled?"LIVE ON":"SAFE";executionStatus.className=d.execution_enabled?"big red":"big green";riskLine.textContent=`Default ${d.default_exchange} | Risk ${d.max_risk_pct_per_trade}% | AI ${d.ai_v3_enabled}`}
+async function loadSafety(){const d=await getJson("/safety/status");safetyStatus.textContent=d.emergency_stop?"STOPPED":"OK";safetyStatus.className=d.emergency_stop?"big red":"big green";safetyLine.textContent=d.session_reason||"";return d}
+async function loadManager(){const d=await getJson("/manager/status");managerStatus.textContent=d.running?"RUNNING":"OFF";managerStatus.className=d.running?"big green":"big yellow";managerLine.textContent=`Every ${d.sleep_seconds}s | Trail ${d.pa_trailing_enabled} | Last ${d.last_run||"never"}`;return d}
+async function loadScanner(){const d=await getJson("/scanner/status");scannerStatus.textContent=d.running?"RUNNING":"OFF";scannerStatus.className=d.running?"big green":"big yellow";scannerLine.textContent=`${d.symbols?.length||0} symbols | ${d.exchange} | ${d.interval}`;const interested=[];(d.last_results||[]).forEach(r=>{const c=r.checks||{};const q=r.quality_score??r.elite_score??Math.max(c.long_quality||0,c.short_quality||0);if(r.signal||q>=1||["bullish","bearish"].includes(r.structure))interested.push({...r,q})});watchCount.textContent=interested.length;watchBody.innerHTML=interested.length?interested.slice(0,80).map(r=>{const ob=r.orderbook||{};const cls=r.signal==="long"?"long":r.signal==="short"?"short":"watch";return `<tr><td>${r.symbol||""}</td><td>${pill(r.signal||"watch",cls)}</td><td>${r.structure||""}</td><td>${r.q??""}</td><td>${ob.pressure||""} ${ob.ratio?"("+Number(ob.ratio).toFixed(2)+")":""}</td><td>${r.reason||r.execution?.reason||""}</td></tr>`}).join(""):'<tr><td colspan="6" class="small">No interesting setups right now</td></tr>'}
+async function loadPositions(){const d=await getJson("/positions/live");const rows=d.rows||[];openCount.textContent=rows.length;const unreal=rows.reduce((a,p)=>a+Number(p.unrealized_pnl||0),0);unrealizedPnl.textContent=money(unreal);unrealizedPnl.className=unreal>=0?"big green":"big red";positionsBody.innerHTML=rows.length?rows.map(p=>`<tr><td>${pill(p.status,"open")}</td><td>${p.ticker}</td><td>${pill(p.signal,p.signal)}</td><td>${fmt(p.entry_price)}</td><td>${fmt(p.mark_price)}</td><td>${fmt(p.stop_price)}</td><td class="${(p.unrealized_pnl||0)>=0?"green":"red"}">${money(p.unrealized_pnl||0)}</td><td>${fmt(p.current_r)}</td><td>${fmt(p.qty)}</td><td><button class="danger" onclick="closePosition('${p.id}')">Close</button></td></tr>`).join(""):'<tr><td colspan="10" class="small">No open positions</td></tr>'}
+async function loadStats(){const d=await getJson("/dashboard/stats");const s=d.summary||{};realizedPnl.textContent=money(s.realized_pnl||0);realizedPnl.className=(s.realized_pnl||0)>=0?"big green":"big red";winRate.textContent=Number(s.win_rate||0).toFixed(1)+"%";winBar.style.width=Math.min(100,Math.max(0,s.win_rate||0))+"%";wlLine.textContent=`W ${s.wins||0} | L ${s.losses||0} | BE ${s.breakeven||0}`;const rows=d.pnl_rows||[];pnlBody.innerHTML=rows.length?rows.slice(0,80).map(r=>`<tr><td>${r.ticker}</td><td>${pill(r.signal,r.signal)}</td><td>${fmt(r.entry_price)}</td><td>${fmt(r.close_price)}</td><td>${fmt(r.qty)}</td><td class="${(r.pnl||0)>=0?"green":"red"}">${money(r.pnl)}</td><td>${r.created_at||""}</td></tr>`).join(""):'<tr><td colspan="7" class="small">No closed trades with PnL yet</td></tr>'}
+async function loadAnalytics(){try{const d=await getJson("/analytics/summary");drawEquity(d.equity_curve||[])}catch(e){drawEquity([])}}
+async function loadMarketIntel(){const [m,l,n]=await Promise.allSettled([getJson("/market/top-movers?limit=8"),getJson("/market/new-listings?limit=8"),getJson("/market/news?limit=6")]);moversData=m.value||{};renderMovers(moversMode);renderListings((l.value||{}).rows||[]);renderNews((n.value||{}).rows||[])}
+async function loadAiV3(){try{const d=await getJson("/ai-v3/status");aiV3Box.textContent=JSON.stringify(d,null,2)}catch(e){aiV3Box.textContent="AI V3 unavailable: "+e.message}}
+async function loadSystem(){const [ws,safety,manager,adaptive,pro]=await Promise.allSettled([getJson("/futures/ws/status"),getJson("/safety/status"),getJson("/manager/status"),getJson("/adaptive/status"),getJson("/pro-engine/status")]);systemBox.textContent=JSON.stringify({websocket:ws.value||ws.reason?.message,safety:safety.value||safety.reason?.message,manager:manager.value||manager.reason?.message,adaptive:adaptive.value||adaptive.reason?.message},null,2);proBox.textContent=JSON.stringify(pro.value||pro.reason?.message,null,2);const healthy=(safety.value&&!safety.value.emergency_stop)&&(manager.value&&manager.value.running);healthDot.className=healthy?"dot green":"dot red";healthText.textContent=healthy?"System healthy: manager online and safety OK":"Check safety/manager status"}
+async function action(url,method){try{const d=await getJson(url,{method});controlResult.textContent=JSON.stringify(d).slice(0,650);setTimeout(refreshAll,700)}catch(e){controlResult.textContent=e.message}}
+async function startScanner(){await action("/scanner/start","POST")} async function stopScanner(){await action("/scanner/stop","POST")} async function scanOnce(){await action("/scanner/scan-once","POST")} async function refreshDiscovery(){await action("/scanner/discover-refresh","POST")} async function startManager(){await action("/manager/start","POST")} async function stopManager(){await action("/manager/stop","POST")} async function startWs(){await action("/futures/ws/start","POST")} async function stopWs(){await action("/futures/ws/stop","POST")} async function syncFutures(){await action("/futures/sync-open","POST")} async function resetPro(){await action("/pro-engine/reset","POST")} async function emergencyStop(){if(confirm("Emergency stop scanner/trading?"))await action("/safety/emergency-stop?reason=dashboard","POST")} async function resumeSafety(){await action("/safety/resume","POST")} async function closePosition(id){if(confirm("Close this position?"))await action("/positions/close/"+id,"POST")}
+async function refreshAll(){await Promise.allSettled([loadRoot(),loadConfig(),loadSafety(),loadManager(),loadScanner(),loadPositions(),loadStats(),loadAnalytics(),loadMarketIntel(),loadAiV3(),loadSystem()]);clockBadge.textContent=new Date().toLocaleTimeString()}
+refreshAll();setInterval(refreshAll,5000);
 </script>
 </body>
 </html>
@@ -3488,14 +3217,9 @@ setInterval(refreshAll, 5000);
 
 
 
-@app.on_event("startup")
-async def startup_ai_v2():
-    if AI_V2_ENABLED and AI_V2_STATE.get("task") is None:
-        AI_V2_STATE["task"] = asyncio.create_task(_ai_v2_loop())
-
 @app.get("/")
 def root():
-    return {"status": "ok", "service": "binance-spot-futures-bot-pro-final-market-dashboard-v1", "time": now_iso()}
+    return {"status": "ok", "service": "binance-spot-futures-bot-pro-final-3d-dashboard-v1", "time": now_iso()}
 
 
 @app.get("/config")
