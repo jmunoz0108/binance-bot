@@ -92,6 +92,28 @@ AI_V2_AUTO_DEFENSIVE = os.getenv("AI_V2_AUTO_DEFENSIVE", "true").lower() == "tru
 AI_V2_BLOCK_BAD_SYMBOLS = os.getenv("AI_V2_BLOCK_BAD_SYMBOLS", "true").lower() == "true"
 AI_V2_BLOCK_BAD_HOURS = os.getenv("AI_V2_BLOCK_BAD_HOURS", "false").lower() == "true"
 
+
+# AI V3 confidence + auto tuning + strategy guardrails
+AI_V3_ENABLED = os.getenv("AI_V3_ENABLED", "true").lower() == "true"
+AI_V3_MIN_CONFIDENCE = float(os.getenv("AI_V3_MIN_CONFIDENCE", "65"))
+AI_V3_DEFENSIVE_CONFIDENCE = float(os.getenv("AI_V3_DEFENSIVE_CONFIDENCE", "78"))
+AI_V3_AGGRESSIVE_CONFIDENCE = float(os.getenv("AI_V3_AGGRESSIVE_CONFIDENCE", "58"))
+AI_V3_AUTO_TUNE = os.getenv("AI_V3_AUTO_TUNE", "true").lower() == "true"
+AI_V3_TUNE_REVIEW_TRADES = int(os.getenv("AI_V3_TUNE_REVIEW_TRADES", "30"))
+AI_V3_RISK_REDUCE_ON_BAD = float(os.getenv("AI_V3_RISK_REDUCE_ON_BAD", "0.50"))
+AI_V3_RISK_BOOST_ON_GOOD = float(os.getenv("AI_V3_RISK_BOOST_ON_GOOD", "1.10"))
+AI_V3_REQUIRE_MTF_WHEN_BAD = os.getenv("AI_V3_REQUIRE_MTF_WHEN_BAD", "true").lower() == "true"
+
+AI_V3_STATE: Dict[str, Any] = {
+    "mode": "learning",
+    "last_review": None,
+    "active_min_confidence": None,
+    "risk_multiplier": 1.0,
+    "recommendations": [],
+    "last_confidence": {},
+    "stats": {},
+}
+
 AI_V2_STATE: Dict[str, Any] = {
     "mode": "learning",
     "last_review": None,
@@ -1019,6 +1041,148 @@ def ai_v2_group_stats(rows, key):
     return stats
 
 
+
+def ai_v3_market_confidence(symbol: str, signal: str, payload_extra: Optional[Dict[str, Any]] = None):
+    """
+    Confidence score 0-100.
+    This is controlled scoring, not random strategy invention.
+    """
+    score = 0
+    reasons = []
+    payload_extra = payload_extra or {}
+
+    # Base setup info from payload
+    if payload_extra.get("bos"):
+        score += 18; reasons.append("+BOS")
+    if payload_extra.get("sweep"):
+        score += 18; reasons.append("+sweep")
+    if payload_extra.get("continuation"):
+        score += 14; reasons.append("+continuation")
+    if payload_extra.get("volume_spike"):
+        score += 10; reasons.append("+volume")
+    if payload_extra.get("candle_confirm"):
+        score += 10; reasons.append("+candle")
+    if payload_extra.get("minor_break"):
+        score += 8; reasons.append("+minor_break")
+
+    # PRO engine/context checks
+    try:
+        regime = pro_market_regime(symbol) if "pro_market_regime" in globals() else {"regime": "unknown", "allow": True}
+        AI_V3_STATE["last_regime"] = regime
+        rg = regime.get("regime")
+        if signal in ["long", "buy"] and rg in ["breakout_up", "trend_up"]:
+            score += 16; reasons.append("+regime_align")
+        elif signal in ["short", "sell"] and rg in ["breakout_down", "trend_down"]:
+            score += 16; reasons.append("+regime_align")
+        elif rg in ["chop", "range"]:
+            score -= 25; reasons.append("-chop")
+    except Exception as exc:
+        reasons.append(f"regime_unknown:{exc}")
+
+    # Orderbook pressure
+    try:
+        ob = get_orderbook_pressure(symbol)
+        AI_V3_STATE["last_orderbook"] = ob
+        pressure = ob.get("pressure")
+        if signal in ["long", "buy"] and pressure == "buyers":
+            score += 10; reasons.append("+buyers")
+        elif signal in ["short", "sell"] and pressure == "sellers":
+            score += 10; reasons.append("+sellers")
+        elif signal in ["long", "buy"] and pressure == "sellers":
+            score -= 18; reasons.append("-sellers_against")
+        elif signal in ["short", "sell"] and pressure == "buyers":
+            score -= 18; reasons.append("-buyers_against")
+    except Exception as exc:
+        reasons.append(f"orderbook_unknown:{exc}")
+
+    # AI V2 learned behavior
+    try:
+        state = ai_v2_review() if "ai_v2_review" in globals() else {}
+        if symbol.upper() in state.get("best_symbols", []):
+            score += 8; reasons.append("+best_symbol")
+        if symbol.upper() in state.get("bad_symbols", []):
+            score -= 20; reasons.append("-bad_symbol")
+        hour = str(datetime.now(timezone.utc).hour)
+        if hour in state.get("best_hours_utc", []):
+            score += 6; reasons.append("+best_hour")
+        if hour in state.get("bad_hours_utc", []):
+            score -= 12; reasons.append("-bad_hour")
+    except Exception as exc:
+        reasons.append(f"ai_v2_unknown:{exc}")
+
+    score = max(0, min(100, score))
+    result = {"score": score, "reasons": reasons}
+    AI_V3_STATE["last_confidence"][symbol.upper()] = result
+    return result
+
+
+def ai_v3_review():
+    if not AI_V3_ENABLED:
+        AI_V3_STATE.update({"mode": "disabled", "last_review": now_iso(), "active_min_confidence": 0})
+        return AI_V3_STATE
+
+    rows = ai_v2_rows() if "ai_v2_rows" in globals() else []
+    rows = rows[:AI_V3_TUNE_REVIEW_TRADES]
+    recs = []
+
+    if len(rows) < max(6, AI_V2_MIN_SAMPLE if "AI_V2_MIN_SAMPLE" in globals() else 8):
+        mode = "learning"
+        active = AI_V3_MIN_CONFIDENCE
+        risk_mult = 1.0
+        recs.append("Collect more paper trades before aggressive tuning.")
+    else:
+        wins = len([r for r in rows if r.get("pnl", 0) > 0])
+        losses = len([r for r in rows if r.get("pnl", 0) < 0])
+        total = wins + losses
+        win_rate = wins / total * 100 if total else 0
+        pnl = sum(float(r.get("pnl") or 0) for r in rows)
+
+        if win_rate < 40 or pnl < 0:
+            mode = "defensive"
+            active = AI_V3_DEFENSIVE_CONFIDENCE
+            risk_mult = AI_V3_RISK_REDUCE_ON_BAD
+            recs += [
+                "AI V3 defensive: raise confidence threshold.",
+                "Reduce risk multiplier.",
+                "Require stronger setups only.",
+            ]
+        elif win_rate >= 58 and pnl > 0:
+            mode = "stable"
+            active = AI_V3_MIN_CONFIDENCE
+            risk_mult = 1.0
+            recs.append("System stable. Keep collecting data.")
+        else:
+            mode = "normal"
+            active = AI_V3_MIN_CONFIDENCE
+            risk_mult = 1.0
+            recs.append("Normal mode: balanced threshold.")
+
+        AI_V3_STATE["stats"] = {"sample": len(rows), "wins": wins, "losses": losses, "win_rate": win_rate, "pnl": pnl}
+
+    AI_V3_STATE.update({
+        "mode": mode,
+        "last_review": now_iso(),
+        "active_min_confidence": active,
+        "risk_multiplier": risk_mult,
+        "recommendations": recs,
+    })
+    return AI_V3_STATE
+
+
+def ai_v3_allows_trade(symbol: str, signal: str, extra: Optional[Dict[str, Any]] = None):
+    if not AI_V3_ENABLED:
+        return True, "AI V3 disabled", {"score": 100, "reasons": []}
+
+    state = ai_v3_review()
+    confidence = ai_v3_market_confidence(symbol, signal, extra)
+    min_conf = float(state.get("active_min_confidence") or AI_V3_MIN_CONFIDENCE)
+
+    if confidence["score"] < min_conf:
+        return False, f"AI V3 confidence too low: {confidence['score']} < {min_conf}", confidence
+
+    return True, "AI V3 confidence passed", confidence
+
+
 def ai_v2_review():
     if not AI_V2_ENABLED:
         AI_V2_STATE.update({"mode": "disabled", "last_review": now_iso(), "recommendations": ["AI V2 disabled"]})
@@ -1204,6 +1368,16 @@ def execute(payload: SignalPayload):
     ai_ok, ai_reason = ai_v2_allows_trade(payload.ticker)
     if not ai_ok:
         return {"approved": False, "reason": ai_reason, "ai_v2": AI_V2_STATE}
+
+    ai3_ok, ai3_reason, ai3_conf = ai_v3_allows_trade(payload.ticker, payload.signal, payload.extra or {})
+    if not ai3_ok:
+        return {"approved": False, "reason": ai3_reason, "ai_v3": AI_V3_STATE, "confidence": ai3_conf}
+
+    # Apply AI V3 risk multiplier into payload extra.
+    if payload.extra is None:
+        payload.extra = {}
+    existing_mult = float(payload.extra.get("risk_multiplier", 1.0))
+    payload.extra["risk_multiplier"] = existing_mult * float(AI_V3_STATE.get("risk_multiplier", 1.0))
 
     adaptive_ok, adaptive_reason = adaptive_allows_new_trade(payload.ticker)
     if not adaptive_ok:
@@ -2123,6 +2297,9 @@ def safety_status():
         "pro_min_24h_quote_volume": PRO_MIN_24H_QUOTE_VOLUME,
         "ai_v2_enabled": AI_V2_ENABLED,
         "ai_v2_mode": AI_V2_STATE.get("mode"),
+        "ai_v3_enabled": AI_V3_ENABLED,
+        "ai_v3_mode": AI_V3_STATE.get("mode"),
+        "ai_v3_active_min_confidence": AI_V3_STATE.get("active_min_confidence"),
     }
 
 
@@ -2700,6 +2877,31 @@ def ai_v2_recommendations():
     return {"mode": state.get("mode"), "recommendations": state.get("recommendations", []), "stats": state.get("stats", {})}
 
 
+
+@app.get("/ai-v3/status")
+def ai_v3_status():
+    return ai_v3_review()
+
+
+@app.get("/ai-v3/confidence/{symbol}/{signal}")
+def ai_v3_confidence(symbol: str, signal: str):
+    return ai_v3_market_confidence(symbol.upper(), signal.lower(), {})
+
+
+@app.post("/ai-v3/reset")
+def ai_v3_reset():
+    AI_V3_STATE.update({
+        "mode": "learning",
+        "last_review": None,
+        "active_min_confidence": None,
+        "risk_multiplier": 1.0,
+        "recommendations": [],
+        "last_confidence": {},
+        "stats": {},
+    })
+    return {"ok": True, "reason": "AI V3 reset"}
+
+
 @app.get("/dashboard", response_class=HTMLResponse)
 def dashboard():
     return """
@@ -2912,7 +3114,7 @@ def dashboard():
     </div>
 
     <div class="grid3">
-        <div class="card"><h3>PRO Engine</h3><pre id="proBox">Loading...</pre></div><div class="card"><h3>AI V2 Brain</h3><pre id="aiV2Box">Loading...</pre></div>
+        <div class="card"><h3>PRO Engine</h3><pre id="proBox">Loading...</pre></div><div class="card"><h3>AI V2 Brain</h3><pre id="aiV2Box">Loading...</pre></div><div class="card"><h3>AI V3 Confidence Brain</h3><pre id="aiV3Box">Loading...</pre></div>
         <div class="card"><h3>Scanner Status</h3><pre id="scannerBox">Loading...</pre></div>
         <div class="card"><h3>System Detail</h3><pre id="systemBox">Loading...</pre></div>
     </div>
@@ -3089,6 +3291,16 @@ async function loadAnalytics() {
         drawEquity(d.equity_curve || []);
     } catch(e) { drawEquity([]); }
 }
+async function loadAiV3() {
+    try {
+        const d = await getJson("/ai-v3/status");
+        const el = document.getElementById("aiV3Box");
+        if (el) el.textContent = JSON.stringify(d, null, 2);
+    } catch(e) {
+        const el = document.getElementById("aiV3Box");
+        if (el) el.textContent = "AI V3 unavailable: " + e.message;
+    }
+}
 async function loadAiV2() {
     try {
         const d = await getJson("/ai-v2/status");
@@ -3138,7 +3350,7 @@ async function emergencyStop(){ if(confirm("Emergency stop scanner/trading?")) a
 async function resumeSafety(){ await action("/safety/resume", "POST"); }
 async function closePosition(id){ if(confirm("Close this position?")) await action("/positions/close/" + id, "POST"); }
 async function refreshAll() {
-    await Promise.allSettled([loadRoot(), loadConfig(), loadSafety(), loadManager(), loadScanner(), loadPositions(), loadStats(), loadAnalytics(), loadSystem(), loadAiV2()]);
+    await Promise.allSettled([loadRoot(), loadConfig(), loadSafety(), loadManager(), loadScanner(), loadPositions(), loadStats(), loadAnalytics(), loadSystem(), loadAiV2(), loadAiV3()]);
     document.getElementById("clockBadge").textContent = new Date().toLocaleTimeString();
 }
 refreshAll();
@@ -3157,7 +3369,7 @@ async def startup_ai_v2():
 
 @app.get("/")
 def root():
-    return {"status": "ok", "service": "binance-spot-futures-bot-pro-final-ai-v2", "time": now_iso()}
+    return {"status": "ok", "service": "binance-spot-futures-bot-pro-final-ai-v3", "time": now_iso()}
 
 
 @app.get("/config")

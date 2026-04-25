@@ -1,23 +1,16 @@
-# Binance Bot AI V2
+# Binance Bot AI V3
 
-Controlled adaptive intelligence upgrade:
-- reviews last closed trades
-- identifies bad symbols
-- identifies best symbols
-- identifies bad/best UTC hours
-- blocks bad symbols when enabled
-- can block bad hours if enabled
-- provides recommendations
-- dashboard AI V2 Brain panel
+Adds confidence scoring and controlled auto tuning:
+- confidence score 0-100 per trade
+- blocks low-confidence trades
+- adjusts risk multiplier in bad conditions
+- defensive confidence threshold after bad performance
+- AI V3 dashboard panel
 
 New endpoints:
-- GET /ai-v2/status
-- GET /ai-v2/recommendations
-- POST /ai-v2/reset
+- GET /ai-v3/status
+- GET /ai-v3/confidence/{symbol}/{signal}
+- POST /ai-v3/reset
 
 Service:
-binance-spot-futures-bot-pro-final-ai-v2
-
-Important:
-This is controlled adaptation, not unsafe random strategy mutation.
-Keep paper mode until you trust the results.
+binance-spot-futures-bot-pro-final-ai-v3
