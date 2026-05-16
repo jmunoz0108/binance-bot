@@ -1,6 +1,6 @@
 """
-WARFARE DASHBOARD — Fetches from all 3 services via HTTP
-No shared volume needed.
+WARFARE DASHBOARD — Fixed version
+Fixes: red dots showing for online services (0 || 9999 JS bug)
 """
 import os, time, json
 import requests
@@ -14,10 +14,18 @@ FILTER_URL  = os.getenv('FILTER_URL', '')
 TRADER_URL  = os.getenv('TRADER_URL', '')
 
 def fetch(url, path='/api/state'):
+    """
+    Returns (data, age_seconds).
+    FIX: Returns actual elapsed time instead of 0,
+    so JavaScript 'age || 9999' works correctly.
+    0 is falsy in JS — any positive number is truthy.
+    """
     try:
+        start = time.time()
         r = requests.get(f"{url}{path}", timeout=5)
+        elapsed = max(0.1, time.time() - start)  # min 0.1s so JS sees truthy value
         if r.status_code == 200:
-            return r.json(), 0
+            return r.json(), round(elapsed, 2)
     except Exception:
         pass
     return {}, 9999
@@ -137,7 +145,20 @@ var f=function(n,d){return(+n||0).toFixed(d||2)}
 var fp=function(n){var v=+n||0;return(v>=0?'+':'')+v.toFixed(2)+'%'}
 function g(id){return document.getElementById(id)}
 function sc(el,v){el.style.color=v>0?'#10b981':v<0?'#ef4444':'#f59e0b'}
-function dot(id,age,thr){var d=g(id);d.className='dot '+(age<thr?'g':age<thr*3?'y':'r')}
+
+// FIX: use (age !== undefined && age !== null) instead of age||9999
+// Old bug: 0 || 9999 = 9999 in JS because 0 is falsy
+function dot(id,age,thr){
+  var d=g(id);
+  var a=(age!==undefined&&age!==null&&age!==9999)?age:9999;
+  d.className='dot '+(a<thr?'g':a<thr*3?'y':'r')
+}
+function ageStr(age){
+  if(age===undefined||age===null||age>=9999)return 'offline';
+  if(age<2)return 'just now';
+  return age.toFixed(1)+'s ago'
+}
+
 function ab(a){
   if(a==='LONG')return '<span class="badge bl">LONG</span>'
   if(a==='SHORT')return '<span class="badge bs">SHORT</span>'
@@ -145,23 +166,24 @@ function ab(a){
   return '<span class="badge">'+a+'</span>'
 }
 function sc2(s){return s>=85?'sc h':s>=70?'sc m':'sc l'}
+
 async function refresh(){
   try{
     var r=await fetch('/api/state'); var d=await r.json()
     g('ts').textContent='Updated: '+new Date().toLocaleTimeString()
-    // Mode
     var demo=d.trader&&d.trader.demo_mode
     var mb=g('mode'); mb.textContent=demo?'🟡 DEMO MODE':'🔴 REAL TRADING'
     mb.className=demo?'mode-d':'mode-r'
-    // Service dots
-    dot('d1',d.scanner_age||9999,120); dot('d2',d.filter_age||9999,200); dot('d3',d.trader_age||9999,90)
-    g('a1').textContent=d.scanner_age<9999?d.scanner_age+'s ago':'offline'
-    g('a2').textContent=d.filter_age<9999?d.filter_age+'s ago':'offline'
-    g('a3').textContent=d.trader_age<9999?d.trader_age+'s ago':'offline'
+
+    // FIX: pass ages directly — dot() handles 9999 as offline
+    dot('d1',d.scanner_age,120); dot('d2',d.filter_age,200); dot('d3',d.trader_age,90)
+    g('a1').textContent=ageStr(d.scanner_age)
+    g('a2').textContent=ageStr(d.filter_age)
+    g('a3').textContent=ageStr(d.trader_age)
     g('c1').textContent=(d.scanner&&d.scanner.symbols_scanned||0)+' coins'
     g('c2').textContent=(d.filter&&d.filter.total_passed||0)+' passed'
     g('c3').textContent=(d.trader&&d.trader.open_positions&&d.trader.open_positions.length||0)+' open'
-    // Stats
+
     var sum=d.results&&d.results.summary||{}
     var wr=+sum.win_rate||0; g('wr').textContent=f(wr,1)+'%'
     g('wr').style.color=wr>=55?'#10b981':wr>=45?'#f59e0b':'#ef4444'
@@ -172,7 +194,7 @@ async function refresh(){
     g('rg').style.color=rg==='BULL'?'#10b981':rg==='BEAR'?'#ef4444':'#f59e0b'
     var fg=d.scanner&&d.scanner.fear_greed||50; g('fg').textContent=fg+'/100'
     g('fg').style.color=fg<30?'#ef4444':fg<45?'#f59e0b':fg>75?'#ef4444':'#10b981'
-    // Open positions
+
     var ops=d.trader&&d.trader.open_positions||[]; var oe=g('ops')
     oe.innerHTML=ops.length?ops.map(function(p){
       var pc=+p.pnl_pct||0; var col=pc>0?'#10b981':'#ef4444'
@@ -184,7 +206,7 @@ async function refresh(){
         '<div class="or"><div style="color:'+col+';font-weight:700">'+fp(pc)+'</div>'+
         '<div style="color:'+col+';font-size:11px">$'+f(p.pnl_usd,4)+'</div></div></div>'
     }).join(''):'<div style="color:#4b5563;font-size:12px;text-align:center;padding:20px">No open positions</div>'
-    // Signals
+
     var sigs=d.filter&&d.filter.signals||[]; var se=g('sigs')
     se.innerHTML=sigs.length?sigs.map(function(s){
       return '<div class="opp"><div class="'+sc2(s.filter_score||0)+'">'+
@@ -195,7 +217,7 @@ async function refresh(){
         '<div class="or"><div style="font-size:13px;font-weight:700">'+f(s.rr_ratio||1,1)+'x</div>'+
         '<div style="color:#4b5563;font-size:10px">$'+f(s.price,6)+'</div></div></div>'
     }).join(''):'<div style="color:#4b5563;font-size:12px;text-align:center;padding:20px">No signals this cycle</div>'
-    // Scanner opps
+
     var opps=d.scanner&&d.scanner.opportunities&&d.scanner.opportunities.slice(0,8)||[]
     var scane=g('scan')
     scane.innerHTML=opps.length?opps.map(function(o){
@@ -207,7 +229,7 @@ async function refresh(){
         '<div class="or"><div style="color:#4b5563;font-size:11px">RSI '+f(o.rsi,0)+'</div>'+
         '<div style="color:#4b5563;font-size:10px">'+(o.change>=0?'+':'')+f(o.change,1)+'%</div></div></div>'
     }).join(''):'<div style="color:#4b5563;font-size:12px;text-align:center;padding:20px">Scanning...</div>'
-    // Funding
+
     var fr=d.scanner&&d.scanner.funding_rates||{}
     var fke=Object.keys(fr).sort(function(a,b){return fr[b]-fr[a]})
     var fe=g('fund')
@@ -219,7 +241,7 @@ async function refresh(){
         (rt*100).toFixed(4)+'%/8h</div>'+
         '<div style="color:#4b5563;font-size:10px">~'+ann+'%/yr</div></div></div>'
     }).join(''):'<div style="color:#4b5563;font-size:12px;text-align:center;padding:20px">No high funding rates</div>'
-    // Trades
+
     var trs=d.results&&d.results.trades&&d.results.trades.slice(-15).reverse()||[]
     var te=g('trades')
     te.innerHTML=trs.length?trs.map(function(t){
@@ -233,15 +255,15 @@ async function refresh(){
         '<td><span class="badge '+(t.outcome==='WIN'?'bw':'blo')+'">'+t.outcome+'</span></td>'+
         '<td style="color:#4b5563;font-size:10px">'+(t.close_reason||'').slice(0,30)+'</td></tr>'
     }).join(''):'<tr><td colspan="10" style="text-align:center;color:#4b5563;padding:16px">No closed trades yet</td></tr>'
-    // Strategy stats
+
     var stm={}
     trs.forEach(function(t){
       if(!stm[t.strategy])stm[t.strategy]={w:0,l:0,p:0}
       if(t.outcome==='WIN')stm[t.strategy].w++; else stm[t.strategy].l++
       stm[t.strategy].p+=(+t.pnl_usd||0)
     })
-    var sk=Object.keys(stm); var ste=g('strats')
-    ste.innerHTML=sk.length?Object.entries(stm).sort(function(a,b){
+    var ste=g('strats')
+    ste.innerHTML=Object.keys(stm).length?Object.entries(stm).sort(function(a,b){
       return(b[1].w/(b[1].w+b[1].l))-(a[1].w/(a[1].w+a[1].l))
     }).map(function(e){
       var s=e[0],d2=e[1]; var tot=d2.w+d2.l; var wr2=tot>0?Math.round(d2.w/tot*100):0
@@ -254,17 +276,17 @@ async function refresh(){
         '<span style="color:'+(d2.p>=0?'#10b981':'#ef4444')+';font-size:10px;margin-left:8px">$'+f(d2.p,2)+'</span></div></div>'+
         '<div class="bar-w"><div class="bar-f" style="width:'+wr2+'%;background:'+col+'"></div></div></div>'
     }).join(''):'<div style="color:#4b5563;font-size:12px;text-align:center;padding:20px">Need 3+ trades per strategy</div>'
-    // Chart
+
     var at=d.results&&d.results.trades&&d.results.trades.slice(-30)||[]
     var ce=g('chart')
     if(at.length){
-      var mx=Math.max(...at.map(function(t){return Math.abs(t.pnl_usd||0)}),0.01)
+      var mx=Math.max.apply(null,at.map(function(t){return Math.abs(t.pnl_usd||0)}).concat([0.01]))
       ce.innerHTML=at.map(function(t){
         var v=+t.pnl_usd||0; var h=Math.max(4,Math.round(Math.abs(v)/mx*56))
         return '<div style="flex:1;height:'+h+'px;border-radius:2px 2px 0 0;background:'+(v>=0?'#10b981':'#ef4444')+'" title="'+t.symbol+' '+fp(t.pnl_pct)+'"></div>'
       }).join('')
     }else{ce.innerHTML='<div style="color:#4b5563;font-size:11px;margin:auto">No trades yet</div>'}
-  }catch(e){console.error(e)}
+  }catch(e){console.error('Dashboard error:',e)}
 }
 refresh(); setInterval(refresh,10000)
 </script>
