@@ -184,7 +184,7 @@ async function refresh(){
     g('c2').textContent=(d.filter&&d.filter.total_passed||0)+' passed'
     g('c3').textContent=(d.trader&&d.trader.open_positions&&d.trader.open_positions.length||0)+' open'
 
-    var sum=d.results&&d.results.summary||{}
+    var sum=(d.results&&d.results.summary)||(d.trader&&d.trader.summary&&{total_trades:d.trader.summary.total,wins:d.trader.summary.wins,losses:d.trader.summary.losses,win_rate:d.trader.summary.wr,total_pnl_usd:d.trader.summary.pnl})||{}
     var wr=+sum.win_rate||0; g('wr').textContent=f(wr,1)+'%'
     g('wr').style.color=wr>=55?'#10b981':wr>=45?'#f59e0b':'#ef4444'
     var pnl=+sum.total_pnl_usd||0; g('pnl').textContent='$'+f(pnl); sc(g('pnl'),pnl)
@@ -242,7 +242,7 @@ async function refresh(){
         '<div style="color:#4b5563;font-size:10px">~'+ann+'%/yr</div></div></div>'
     }).join(''):'<div style="color:#4b5563;font-size:12px;text-align:center;padding:20px">No high funding rates</div>'
 
-    var trs=d.results&&d.results.trades&&d.results.trades.slice(-15).reverse()||[]
+    var trs=(d.results&&d.results.trades&&d.results.trades.slice(-15).reverse())||(d.trader&&d.trader.recent_closed&&d.trader.recent_closed.slice(-15).map(function(t){return{symbol:t.symbol,action:t.action,strategy:t.strategy,entry_price:t.entry_price,exit_price:t.current_price,pnl_pct:t.pnl_pct,pnl_usd:t.pnl_usd,outcome:t.outcome,close_reason:t.close_reason,filter_score:t.filter_score}}).reverse())||[]
     var te=g('trades')
     te.innerHTML=trs.length?trs.map(function(t){
       var col=t.pnl_pct>0?'#10b981':'#ef4444'
@@ -302,7 +302,33 @@ def api_state():
     scanner, sa = fetch(SCANNER_URL) if SCANNER_URL else ({}, 9999)
     filt,    fa = fetch(FILTER_URL)  if FILTER_URL  else ({}, 9999)
     trader,  ta = fetch(TRADER_URL)  if TRADER_URL  else ({}, 9999)
-    results, _  = fetch(TRADER_URL, '/api/results') if TRADER_URL else ({}, 9999)
+    # Build results from trader state — /api/results endpoint doesn't exist
+    # trader already has summary + recent_closed in /api/state
+    results = {}
+    if trader:
+        sm = trader.get('summary', {})
+        closed = trader.get('recent_closed', [])
+        results = {
+            'summary': {
+                'total_trades': sm.get('total', 0),
+                'wins':         sm.get('wins', 0),
+                'losses':       sm.get('losses', 0),
+                'win_rate':     sm.get('wr', 0),
+                'total_pnl_usd': sm.get('pnl', 0),
+            },
+            'trades': [{
+                'symbol':       t.get('symbol', ''),
+                'action':       t.get('action', ''),
+                'strategy':     t.get('strategy', ''),
+                'entry_price':  t.get('entry_price', 0),
+                'exit_price':   t.get('current_price', 0),
+                'pnl_pct':      t.get('pnl_pct', 0),
+                'pnl_usd':      t.get('pnl_usd', 0),
+                'outcome':      t.get('outcome', ''),
+                'close_reason': t.get('close_reason', ''),
+                'filter_score': t.get('filter_score', 0),
+            } for t in closed]
+        }
     return jsonify({
         'scanner': scanner, 'filter': filt, 'trader': trader, 'results': results,
         'scanner_age': sa, 'filter_age': fa, 'trader_age': ta,
