@@ -511,27 +511,26 @@ class Scanner:
                 if o: opps.append(o)
         # Bybit — now runs through the SAME quality gates as Binance (was just
         # a naive "went up → LONG" with a flat score, skipping all the new
-        # filtering). Fetch klines for each candidate and apply MTF + exhaustion.
+        # filtering). Now runs the SAME 3 strategies (momentum/squeeze/reversal)
+        # as Binance with the same indicators — full parity, not a weaker scan.
         if os.getenv('BYBIT_API_KEY'):
             try:
                 from pybit.unified_trading import HTTP
                 b=HTTP(api_key=os.getenv('BYBIT_API_KEY'),api_secret=os.getenv('BYBIT_API_SECRET'))
                 r=b.get_tickers(category='linear')
                 if r.get('retCode',1)==0:
-                    # sort by volume, take top movers to limit kline calls
                     cands=[t for t in r['result']['list']
                            if t['symbol'].endswith('USDT')
-                           and abs(float(t['price24hPcnt'])*100)>3
-                           and float(t['turnover24h'])>3_000_000]
+                           and abs(float(t['price24hPcnt'])*100)>2
+                           and float(t['turnover24h'])>2_000_000]
                     cands.sort(key=lambda t: float(t['turnover24h']), reverse=True)
-                    for t in cands[:25]:   # cap to top 25 by volume
+                    by_count=0
+                    for t in cands[:TOP_N]:   # scan as many as Binance (TOP_N)
                         s=t['symbol']
                         ch=float(t['price24hPcnt'])*100; vol=float(t['turnover24h'])
                         px=float(t['lastPrice'])
-                        action='LONG' if ch>0 else 'SHORT'
-                        # fetch Bybit klines (1h + 4h) for the gates
                         try:
-                            k1=b.get_kline(category='linear',symbol=s,interval='60',limit=50)
+                            k1=b.get_kline(category='linear',symbol=s,interval='60',limit=60)
                             k4=b.get_kline(category='linear',symbol=s,interval='240',limit=50)
                             cl=[float(x[4]) for x in reversed(k1['result']['list'])]
                             cl4=[float(x[4]) for x in reversed(k4['result']['list'])]
@@ -539,20 +538,30 @@ class Scanner:
                         except Exception:
                             continue
                         if len(cl)<21: continue
-                        rvb=rsi(cl)
-                        # same regime + MTF + exhaustion gates as Binance
-                        o={'symbol':s,'action':action,'strategy':'Bybit Scanner',
-                           'score':65,'confidence':0.72,'price':px,'change':ch,
-                           'volume':vol,'reason':f"Bybit: {ch:+.1f}% ${vol/1e6:.1f}M"}
-                        if not self.regime.allows(o, cl): continue
-                        _ok,_bonus,_why = mtf_gate(action, cl, cl4)
-                        if not _ok: continue
-                        _blk,_vc,_vw = exhaustion_veto(action, cl, vols, rvb)
-                        if _blk: continue
-                        if _vc>=0.35 and not ai_tiebreak(s,action,_vw,rvb,ch): continue
-                        o['score']=min(100,65+_bonus); o['mtf']=_why
-                        o['reason']+=f" | MTF: {_why}"
-                        opps.append(o)
+                        # same indicators Binance uses
+                        rvb=rsi(cl); mhvb=mh(cl); bbdb=bb(cl)
+                        tkb={'price':px,'change':ch,'volume':vol}
+                        # run the SAME 3 strategies as Binance
+                        for fn,args in [(s_momentum,(s,tkb,cl,vols,bbdb,rvb,mhvb,0.)),
+                                        (s_squeeze,(s,tkb,cl,bbdb,rvb,0.)),
+                                        (s_reversal,(s,tkb,cl,vols,rvb,0.))]:
+                            try:
+                                o=fn(*args)
+                                if not o: continue
+                                o['strategy']='Bybit '+o['strategy']
+                                o['exchange']='bybit'
+                                if not self.regime.allows(o, cl): continue
+                                _ok,_bonus,_why=mtf_gate(o['action'],cl,cl4)
+                                if not _ok: continue
+                                _blk,_vc,_vw=exhaustion_veto(o['action'],cl,vols,rvb)
+                                if _blk: continue
+                                if _vc>=0.35 and not ai_tiebreak(s,o['action'],_vw,rvb,ch): continue
+                                o['score']=min(100,o.get('score',60)+_bonus)
+                                o['mtf']=_why
+                                o['reason']=f"{o.get('reason','')} | MTF: {_why}"
+                                opps.append(o); by_count+=1
+                            except: pass
+                    log.info(f"   🟣 Bybit: {by_count} signals (full strategy parity)")
             except Exception as e: log.info(f"Bybit: {e}")
         opps.sort(key=lambda x:x['score'],reverse=True)
         by_s=defaultdict(int)
