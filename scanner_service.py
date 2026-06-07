@@ -69,7 +69,10 @@ class Feed:
         self.valid=set(); self._lock=threading.Lock()
 
     def start(self, c):
-        self._c=c; self._rest(c)
+        self._c=c
+        if c is None:
+            return   # Binance blocked — Feed stays empty, Bybit scan provides opps
+        self._rest(c)
         threading.Thread(target=self._ws,daemon=True).start()
 
     def _rest(self, c):
@@ -399,11 +402,19 @@ STATE = {'timestamp': None, 'opportunities': [], 'regime': 'NEUTRAL',
 
 class Scanner:
     def __init__(self):
-        self.client=Client(os.getenv('MAIN_API_KEY'),os.getenv('MAIN_API_SECRET'))
+        try:
+            self.client=Client(os.getenv('MAIN_API_KEY'),os.getenv('MAIN_API_SECRET'))
+            log.info("✅ Binance client ready")
+        except Exception as e:
+            log.warning(f"⚠️  Binance unavailable ({str(e)[:60]}) — "
+                        f"scanner runs on Bybit only (not fatal)")
+            self.client=None
         self.feed=Feed(); self.regime=Regime()
         self.klines={}; self.klines_ts=datetime.min
 
     def _load_klines(self,syms):
+        if self.client is None:
+            return   # Binance blocked — Bybit scan handles its own klines
         if (datetime.now()-self.klines_ts).seconds<1800 and self.klines: return
         log.info(f"Loading multi-TF klines for {len(syms[:TOP_N])} symbols...")
         new={}
@@ -428,6 +439,8 @@ class Scanner:
 
     def _funding(self):
         rates={}
+        if self.client is None:
+            return rates
         try:
             seen={}
             for r in self.client.futures_funding_rate(limit=500):
@@ -441,11 +454,16 @@ class Scanner:
     def scan(self):
         global STATE
         top=self.feed.top(TOP_N)
-        if not top: log.warning("No data yet"); return
-        self._load_klines(top); self.regime.update(self.feed)
+        # If Binance is blocked, top is empty — that's OK, skip the Binance loop
+        # and go straight to the Bybit scan below (Bybit-only mode).
+        if not top and self.client is not None:
+            log.warning("No data yet"); return
+        if self.client is not None:
+            self._load_klines(top)
+        self.regime.update(self.feed)
         funding=self._funding()
         opps=[]; ta={}
-        log.info(f"🔍 Scanning {len(top)} coins | Regime: {self.regime.r}")
+        log.info(f"🔍 Scanning {len(top)} Binance + Bybit | Regime: {self.regime.r}")
         for sym in top:
             tk=self.feed.tickers.get(sym,{})
             if tk.get('price',0)<=0: continue
@@ -491,22 +509,50 @@ class Scanner:
             if fr>0:
                 o=s_funding(sym,fr,tk)
                 if o: opps.append(o)
-        # Bybit
+        # Bybit — now runs through the SAME quality gates as Binance (was just
+        # a naive "went up → LONG" with a flat score, skipping all the new
+        # filtering). Fetch klines for each candidate and apply MTF + exhaustion.
         if os.getenv('BYBIT_API_KEY'):
             try:
                 from pybit.unified_trading import HTTP
                 b=HTTP(api_key=os.getenv('BYBIT_API_KEY'),api_secret=os.getenv('BYBIT_API_SECRET'))
                 r=b.get_tickers(category='linear')
                 if r.get('retCode',1)==0:
-                    for t in r['result']['list']:
+                    # sort by volume, take top movers to limit kline calls
+                    cands=[t for t in r['result']['list']
+                           if t['symbol'].endswith('USDT')
+                           and abs(float(t['price24hPcnt'])*100)>3
+                           and float(t['turnover24h'])>3_000_000]
+                    cands.sort(key=lambda t: float(t['turnover24h']), reverse=True)
+                    for t in cands[:25]:   # cap to top 25 by volume
                         s=t['symbol']
-                        if not s.endswith('USDT'): continue
                         ch=float(t['price24hPcnt'])*100; vol=float(t['turnover24h'])
-                        if abs(ch)>3 and vol>3_000_000:
-                            opps.append({'symbol':s,'action':'LONG' if ch>0 else 'SHORT',
-                                'strategy':'Bybit Scanner','score':65,'confidence':0.72,
-                                'price':float(t['lastPrice']),'change':ch,'volume':vol,
-                                'reason':f"Bybit: {ch:+.1f}% ${vol/1e6:.1f}M"})
+                        px=float(t['lastPrice'])
+                        action='LONG' if ch>0 else 'SHORT'
+                        # fetch Bybit klines (1h + 4h) for the gates
+                        try:
+                            k1=b.get_kline(category='linear',symbol=s,interval='60',limit=50)
+                            k4=b.get_kline(category='linear',symbol=s,interval='240',limit=50)
+                            cl=[float(x[4]) for x in reversed(k1['result']['list'])]
+                            cl4=[float(x[4]) for x in reversed(k4['result']['list'])]
+                            vols=[float(x[5]) for x in reversed(k1['result']['list'])]
+                        except Exception:
+                            continue
+                        if len(cl)<21: continue
+                        rvb=rsi(cl)
+                        # same regime + MTF + exhaustion gates as Binance
+                        o={'symbol':s,'action':action,'strategy':'Bybit Scanner',
+                           'score':65,'confidence':0.72,'price':px,'change':ch,
+                           'volume':vol,'reason':f"Bybit: {ch:+.1f}% ${vol/1e6:.1f}M"}
+                        if not self.regime.allows(o, cl): continue
+                        _ok,_bonus,_why = mtf_gate(action, cl, cl4)
+                        if not _ok: continue
+                        _blk,_vc,_vw = exhaustion_veto(action, cl, vols, rvb)
+                        if _blk: continue
+                        if _vc>=0.35 and not ai_tiebreak(s,action,_vw,rvb,ch): continue
+                        o['score']=min(100,65+_bonus); o['mtf']=_why
+                        o['reason']+=f" | MTF: {_why}"
+                        opps.append(o)
             except Exception as e: log.info(f"Bybit: {e}")
         opps.sort(key=lambda x:x['score'],reverse=True)
         by_s=defaultdict(int)
