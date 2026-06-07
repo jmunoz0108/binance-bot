@@ -49,8 +49,14 @@ def _rsi(p, n=14):
 class MTF:
     def __init__(self, c): self.c = c; self._cache = {}; self._ts = {}
     def bias(self, sym):
-        if self.c is None:
-            return 'NEUTRAL'   # no Binance → no 4h bias, treat as neutral
+        # DISABLED: this made a synchronous Binance get_klines call PER SYMBOL,
+        # which hung the whole filter loop (and its API → trader timeouts) when
+        # Binance was geo-throttled. The SCANNER already applies the 4h MTF gate
+        # before emitting opportunities, so re-checking here is redundant. Return
+        # NEUTRAL (no penalty, no Binance call) — the scanner's MTF is the source
+        # of truth now.
+        return 'NEUTRAL'
+    def _bias_unused(self, sym):
         now = time.time()
         if sym in self._cache and now - self._ts.get(sym, 0) < 900:
             return self._cache[sym]
