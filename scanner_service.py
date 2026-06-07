@@ -116,22 +116,93 @@ class Feed:
         except: return 0.
 
 # ── Strategies ────────────────────────────────────────────────────────────────
+def mtf_gate(action, cl_1h, cl_4h, highs_4h=None, lows_4h=None):
+    """
+    MULTI-TIMEFRAME CONFIRMATION GATE — the solid core.
+
+    A trade only passes when the higher timeframe AGREES with the trade
+    direction. This is the "use higher timeframe for better data + confirmation,
+    lower timeframe for entry" approach. Three checks, all must pass:
+
+      • 4h TREND (the boss): EMA9>EMA21 rising = up; reverse = down. The trade
+        must align — no LONG in a 4h downtrend, no SHORT in a 4h uptrend.
+      • 1h DIRECTION: must confirm the same direction (not fighting the hour).
+      • NOT EXTENDED: if price is already stretched far from the 4h EMA, the
+        move is late — reject (this is what fixed the 'enters too late' problem).
+
+    Returns (passed: bool, bonus: int, reason: str). bonus rewards strong
+    multi-TF alignment so the best setups score highest.
+    """
+    if not cl_4h or len(cl_4h) < 21 or not cl_1h or len(cl_1h) < 21:
+        return True, 0, "insufficient MTF data — neutral"   # don't block on missing data
+
+    # 4h trend (the boss)
+    e9_4  = ema(cl_4h, 9); e21_4 = ema(cl_4h, 21)
+    e9_4p = ema(cl_4h[:-2], 9) if len(cl_4h) > 11 else e9_4
+    cur4  = cl_4h[-1]
+    up_4   = e9_4 > e21_4 and e9_4 >= e9_4p
+    down_4 = e9_4 < e21_4 and e9_4 <= e9_4p
+    strength_4 = abs(e9_4 - e21_4) / cur4 * 100 if cur4 else 0
+
+    # 1h direction
+    e9_1  = ema(cl_1h, 9); e21_1 = ema(cl_1h, 21)
+    up_1   = e9_1 > e21_1
+    down_1 = e9_1 < e21_1
+
+    # Extension check (late-entry guard): how far is price above/below 4h EMA21?
+    ext = (cur4 - e21_4) / e21_4 * 100 if e21_4 else 0
+
+    if action == 'LONG':
+        if not up_4:
+            return False, 0, f"4h not up (e9{'<' if down_4 else '~'}e21) — no LONG"
+        if not up_1:
+            return False, 0, "1h not confirming up — wait"
+        if ext > 12:
+            return False, 0, f"extended +{ext:.0f}% above 4h EMA — late entry"
+        bonus = 10
+        if strength_4 >= 1.0: bonus += 8
+        if up_1 and up_4:     bonus += 7
+        if ext < 5:           bonus += 5   # early in the move = best
+        return True, bonus, f"4h+1h UP aligned (str {strength_4:.1f}%, ext {ext:+.0f}%)"
+
+    if action == 'SHORT':
+        if not down_4:
+            return False, 0, f"4h not down — no SHORT"
+        if not down_1:
+            return False, 0, "1h not confirming down — wait"
+        if ext < -12:
+            return False, 0, f"extended {ext:.0f}% below 4h EMA — late short"
+        bonus = 10
+        if strength_4 >= 1.0: bonus += 8
+        if down_1 and down_4: bonus += 7
+        if ext > -5:          bonus += 5
+        return True, bonus, f"4h+1h DOWN aligned (str {strength_4:.1f}%, ext {ext:+.0f}%)"
+
+    # funding / other: don't gate
+    return True, 0, "non-directional — passed"
+
+
 def s_momentum(sym,tk,cl,vols,bbd,rv,mhv,obv):
     ch=tk.get('change',0); pr=tk.get('price',0)
-    if ch<5: return None
+    # Was: ch<5 → only fired AFTER a coin already ran 5%+ (entering late, at the
+    # top). Now catch momentum as it BUILDS: 2%+ with rising volume. Also cap the
+    # extended chase — a coin already up 20%+ is a LATE entry, penalize it.
+    if ch<2: return None
     v=vr(vols); sc=0; rr=[]
-    if 5<=ch<=10: sc+=20; rr.append(f"+{ch:.1f}%")
-    elif ch<=20: sc+=28; rr.append(f"+{ch:.1f}% strong")
-    elif ch<=35: sc+=22; rr.append(f"+{ch:.1f}% explosive")
-    else: sc+=8; rr.append(f"+{ch:.1f}% extended")
+    if 2<=ch<5:   sc+=24; rr.append(f"+{ch:.1f}% early")   # the sweet spot: early
+    elif 5<=ch<=10: sc+=20; rr.append(f"+{ch:.1f}%")
+    elif ch<=20: sc+=14; rr.append(f"+{ch:.1f}% strong")
+    else: sc-=5; rr.append(f"+{ch:.1f}% extended/late")    # too late, discourage
     if v>=3: sc+=25; rr.append(f"vol {v:.1f}x")
     elif v>=2: sc+=18; rr.append(f"vol {v:.1f}x")
     elif v>=1.5: sc+=10
     else: sc-=10
     rv2=rsi(cl)
-    if 55<=rv2<=68: sc+=18; rr.append(f"RSI {rv2:.0f}✅")
-    elif rv2<50: return None
-    elif rv2>72: sc-=15
+    # Earlier entries mean lower RSI is GOOD (move just starting), not a reject.
+    if 48<=rv2<=62: sc+=18; rr.append(f"RSI {rv2:.0f}✅ early")
+    elif 62<rv2<=70: sc+=10; rr.append(f"RSI {rv2:.0f}")
+    elif rv2<42: return None       # no momentum yet
+    elif rv2>74: sc-=18            # overbought = late
     if mhv>0: sc+=10; rr.append("MACD↑")
     if obv>0.20: sc+=14; rr.append(f"OB+{obv:.2f}")
     elif obv>0.10: sc+=7
@@ -208,11 +279,26 @@ class Regime:
         else: self.r='NEUTRAL'
         if self.r!=old: log.info(f"📈 Regime: {old}→{self.r}")
         self._ts=datetime.now()
-    def allows(self,o):
+    def allows(self,o,coin_klines=None):
         a=o.get('action','')
         if 'funding' in o.get('strategy','').lower(): return True
         if self.r=='BULL': return a=='LONG'
         if self.r=='BEAR': return a=='SHORT'
+        # NEUTRAL regime: the old code allowed EVERYTHING here, which is most of
+        # the time — so longs AND shorts flooded through with no protection,
+        # producing the bad win rate. Now: in NEUTRAL, require the trade to align
+        # with the COIN'S OWN trend (EMA9 vs EMA21). No clean coin trend → reject.
+        if coin_klines is not None and len(coin_klines) >= 21:
+            try:
+                cl = [float(x) for x in coin_klines]
+                e9, e21 = ema(cl, 9), ema(cl, 21)
+                e9_prev = ema(cl[:-3], 9) if len(cl) > 12 else e9
+                up   = e9 > e21 and e9 > e9_prev
+                down = e9 < e21 and e9 < e9_prev
+                if a == 'LONG':  return up
+                if a == 'SHORT': return down
+            except Exception:
+                return True
         return True
 
 # ── Scanner ───────────────────────────────────────────────────────────────────
@@ -229,16 +315,26 @@ class Scanner:
 
     def _load_klines(self,syms):
         if (datetime.now()-self.klines_ts).seconds<1800 and self.klines: return
-        log.info(f"Loading klines for {len(syms[:TOP_N])} symbols...")
+        log.info(f"Loading multi-TF klines for {len(syms[:TOP_N])} symbols...")
         new={}
         for s in syms[:TOP_N]:
             try:
-                r=self.client.get_klines(symbol=s,interval='1h',limit=100)
-                new[s]={'closes':[float(k[4]) for k in r],
-                        'volumes':[float(k[5]) for k in r]}
+                # 1h for momentum/entry, 4h for the higher-timeframe trend (the
+                # boss). A trade only fires when 4h trend + 1h direction agree.
+                r1=self.client.get_klines(symbol=s,interval='1h',limit=100)
+                d={'closes':[float(k[4]) for k in r1],
+                   'volumes':[float(k[5]) for k in r1]}
+                try:
+                    r4=self.client.get_klines(symbol=s,interval='4h',limit=60)
+                    d['closes_4h']=[float(k[4]) for k in r4]
+                    d['highs_4h']=[float(k[2]) for k in r4]
+                    d['lows_4h']=[float(k[3]) for k in r4]
+                except Exception:
+                    d['closes_4h']=[]
+                new[s]=d
             except: pass
         self.klines=new; self.klines_ts=datetime.now()
-        log.info(f"✅ Klines ready: {len(new)} symbols")
+        log.info(f"✅ Multi-TF klines ready: {len(new)} symbols (1h + 4h)")
 
     def _funding(self):
         rates={}
@@ -277,7 +373,18 @@ class Scanner:
                             (s_reversal,(sym,tk,cl,vols,rv,obv))]:
                 try:
                     o=fn(*args)
-                    if o and self.regime.allows(o): opps.append(o)
+                    if not o: continue
+                    if not self.regime.allows(o, cl): continue
+                    # MULTI-TIMEFRAME GATE — higher timeframe must confirm
+                    cl4 = h.get('closes_4h', [])
+                    _ok, _bonus, _why = mtf_gate(o['action'], cl, cl4,
+                                                 h.get('highs_4h'), h.get('lows_4h'))
+                    if not _ok:
+                        continue   # higher timeframe disagrees — skip
+                    o['score'] = min(100, o.get('score', 50) + _bonus)
+                    o['mtf'] = _why
+                    o['reason'] = f"{o.get('reason','')} | MTF: {_why}"
+                    opps.append(o)
                 except: pass
             fr=funding.get(sym,0)
             if fr>0:
