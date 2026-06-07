@@ -219,7 +219,18 @@ class Journal:
 
 class Trader:
     def __init__(self):
-        self.client    = Client(os.getenv('MAIN_API_KEY'), os.getenv('MAIN_API_SECRET'))
+        # Binance pings on client creation; if the region is geo-blocked this
+        # crashed the trader at startup. The trader executes on Bybit (and demo),
+        # so a Binance failure must NOT kill it — run without the Binance client.
+        self.client = None
+        try:
+            self.client = Client(os.getenv('MAIN_API_KEY'),
+                                 os.getenv('MAIN_API_SECRET'))
+            log.info("✅ Binance client ready")
+        except Exception as e:
+            log.warning(f"⚠️  Binance unavailable ({str(e)[:60]}) — "
+                        f"trader runs on Bybit/demo only (not fatal)")
+            self.client = None
         self.trail     = TrailingStop(sl_pct=SL_PCT)
         self.tracker   = PositionTracker()
         self.journal   = Journal()
@@ -234,13 +245,28 @@ class Trader:
             self.last_reset_date   = today
 
     def _price(self, symbol):
-        try:
-            return float(self.client.get_symbol_ticker(symbol=symbol)['price'])
-        except Exception:
+        # Binance first (if available), then Bybit fallback. With Binance
+        # geo-blocked, Bybit keeps prices flowing so the trader still works.
+        if self.client is not None:
             try:
-                return float(self.client.futures_symbol_ticker(symbol=symbol)['price'])
+                return float(self.client.get_symbol_ticker(symbol=symbol)['price'])
             except Exception:
-                return 0.0
+                try:
+                    return float(self.client.futures_symbol_ticker(symbol=symbol)['price'])
+                except Exception:
+                    pass
+        # Bybit fallback
+        try:
+            if not hasattr(self, '_bybit') or self._bybit is None:
+                from pybit.unified_trading import HTTP
+                self._bybit = HTTP(api_key=os.getenv('BYBIT_API_KEY'),
+                                   api_secret=os.getenv('BYBIT_API_SECRET'))
+            r = self._bybit.get_tickers(category='linear', symbol=symbol)
+            if r.get('retCode') == 0 and r['result']['list']:
+                return float(r['result']['list'][0]['lastPrice'])
+        except Exception:
+            pass
+        return 0.0
 
     def _futures_precision(self, symbol):
         try:
