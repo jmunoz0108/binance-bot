@@ -16,8 +16,11 @@ log = logging.getLogger('filter')
 PORT            = int(os.getenv('PORT', 8080))
 SCANNER_URL     = os.getenv('SCANNER_URL', '')
 FILTER_INTERVAL = 90
-MIN_SCORE       = 68   # ← FIXED: was 78, too high for bear markets
-MAX_SIGNALS     = 3
+# Higher bar = fewer, better trades. The whole strategy now is quality over
+# quantity: 2-4 high-conviction trades a day beat 14 mediocre ones that get
+# chopped up. Raised from 68 → 76. Tune via MIN_SCORE env.
+MIN_SCORE       = int(os.getenv('MIN_SCORE', '76'))
+MAX_SIGNALS     = int(os.getenv('MAX_SIGNALS', '2'))
 
 log.info("=" * 55)
 log.info("WARFARE FILTER — Fixed")
