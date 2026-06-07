@@ -22,7 +22,12 @@ os.makedirs('/app/data', exist_ok=True)
 DEMO_MODE        = os.getenv('DEMO_MODE', 'true').strip().lower() in ('true','1','yes')
 MAX_POS_USD      = float(os.getenv('MAX_POSITION_USD', '20'))
 MAX_OPEN_POS     = int(os.getenv('MAX_OPEN_POSITIONS', '3'))
-SL_PCT           = float(os.getenv('STOP_LOSS_PCT', '1.5')) / 100
+# Wider stop (3.5% default, was 1.5%): a 1.5% stop sits INSIDE normal market
+# noise — price wiggles 1.5% constantly without the trend changing, so tight
+# stops get chopped out of trades that would have worked. A wider stop gives the
+# trade room to breathe and ride the trend, matching the "fewer trades, higher
+# SL, let it run" strategy. Tune via STOP_LOSS_PCT env.
+SL_PCT           = float(os.getenv('STOP_LOSS_PCT', '3.5')) / 100
 MAX_REAL_PER_DAY = int(os.getenv('MAX_REAL_TRADES_DAY', '15'))
 
 log.info("=" * 55)
@@ -54,24 +59,34 @@ class TrailingStop:
         if pnl > s['peak_pnl']:
             s['peak_pnl'] = pnl
         peak = s['peak_pnl']
-        if peak >= 0.20:   buf = 0.005
-        elif peak >= 0.10: buf = 0.008
-        elif peak >= 0.05: buf = 0.012
-        elif peak >= 0.02: buf = 0.013
-        else:              buf = 0.015
-        if peak > 0:
+        # LET WINNERS RUN. The old trail tightened almost immediately (1.5% buf
+        # from the start), cutting trends short. New logic: don't trail at all
+        # until the trade is solidly in profit, then trail LOOSELY so it rides
+        # the move, only tightening once the gain is large enough to protect.
+        #   < +3%  : no trail yet — just the hard stop. Give it room.
+        #   +3-8%  : loose trail (give back ~2.5% to stay in the trend)
+        #   +8-15% : medium trail (give back ~2%)
+        #   +15-25%: tighter (1.2%)
+        #   > +25% : lock it in (0.7%)
+        if   peak >= 0.25: buf = 0.007
+        elif peak >= 0.15: buf = 0.012
+        elif peak >= 0.08: buf = 0.020
+        elif peak >= 0.03: buf = 0.025
+        else:              buf = None   # below +3% → no trail, only hard stop
+        if buf is not None and peak > 0:
             new_sl = peak - buf
             if new_sl > s['dynamic_sl']:
                 s['dynamic_sl'] = new_sl
                 if not s['be_active'] and new_sl >= 0:
                     s['be_active'] = True
                     log.info(f"  🔒 {symbol} BREAKEVEN SL→{new_sl*100:+.2f}%")
-        if pnl <= s['dynamic_sl']:
+        if buf is not None and pnl <= s['dynamic_sl'] and s['dynamic_sl'] > -self.sl_pct:
             reason = (f"TRAIL HIT pnl={pnl*100:.2f}% "
                       f"sl={s['dynamic_sl']*100:.2f}% peak={s['peak_pnl']*100:.2f}%")
             del self.state[symbol]
             return True, reason
-        if pnl <= -self.sl_pct * 1.5:
+        # Hard stop — the wider SL_PCT (3.5%) gives the trade room to work.
+        if pnl <= -self.sl_pct:
             reason = f"HARD STOP pnl={pnl*100:.2f}%"
             del self.state[symbol]
             return True, reason
