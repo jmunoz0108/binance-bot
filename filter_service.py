@@ -49,6 +49,8 @@ def _rsi(p, n=14):
 class MTF:
     def __init__(self, c): self.c = c; self._cache = {}; self._ts = {}
     def bias(self, sym):
+        if self.c is None:
+            return 'NEUTRAL'   # no Binance → no 4h bias, treat as neutral
         now = time.time()
         if sym in self._cache and now - self._ts.get(sym, 0) < 900:
             return self._cache[sym]
@@ -127,7 +129,20 @@ def score_opp(opp, scanner_data, mtf, regime):
 
 class Filter:
     def __init__(self):
-        self.client = Client(os.getenv('MAIN_API_KEY'), os.getenv('MAIN_API_SECRET'))
+        # Binance pings on client creation. If the server region is geo-blocked
+        # ("Service unavailable from a restricted location") this used to CRASH
+        # the whole filter at startup. The filter only needs Binance for the 4h
+        # MTF bias (a bonus), so failing that should NOT kill the service —
+        # degrade gracefully and run without it.
+        self.client = None
+        try:
+            self.client = Client(os.getenv('MAIN_API_KEY'),
+                                 os.getenv('MAIN_API_SECRET'))
+            log.info("✅ Binance client ready (4h MTF bias enabled)")
+        except Exception as e:
+            log.warning(f"⚠️  Binance unavailable ({str(e)[:60]}) — "
+                        f"filter runs WITHOUT 4h MTF bias (not fatal)")
+            self.client = None
         self.mtf    = MTF(self.client)
         self.dedup  = Dedup()
 
