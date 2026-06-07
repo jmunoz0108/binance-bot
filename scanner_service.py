@@ -139,12 +139,13 @@ def mtf_gate(action, cl_1h, cl_4h, highs_4h=None, lows_4h=None):
     if not cl_4h or len(cl_4h) < 21 or not cl_1h or len(cl_1h) < 21:
         return True, 0, "insufficient MTF data — neutral"   # don't block on missing data
 
-    # 4h trend (the boss)
+    # 4h trend (the boss) — direction from EMA9 vs EMA21. Loosened: we no longer
+    # also require the EMA to be rising/falling (too strict — gave 0 opps in
+    # choppy markets). EMA9 above EMA21 = uptrend bias is enough for the 4h boss.
     e9_4  = ema(cl_4h, 9); e21_4 = ema(cl_4h, 21)
-    e9_4p = ema(cl_4h[:-2], 9) if len(cl_4h) > 11 else e9_4
     cur4  = cl_4h[-1]
-    up_4   = e9_4 > e21_4 and e9_4 >= e9_4p
-    down_4 = e9_4 < e21_4 and e9_4 <= e9_4p
+    up_4   = e9_4 > e21_4
+    down_4 = e9_4 < e21_4
     strength_4 = abs(e9_4 - e21_4) / cur4 * 100 if cur4 else 0
 
     # 1h direction
@@ -342,9 +343,8 @@ class Regime:
             try:
                 cl = [float(x) for x in coin_klines]
                 e9, e21 = ema(cl, 9), ema(cl, 21)
-                e9_prev = ema(cl[:-3], 9) if len(cl) > 12 else e9
-                up   = e9 > e21 and e9 > e9_prev
-                down = e9 < e21 and e9 < e9_prev
+                up   = e9 > e21
+                down = e9 < e21
                 if a == 'LONG':  return up
                 if a == 'SHORT': return down
             except Exception:
