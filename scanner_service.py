@@ -182,6 +182,53 @@ def mtf_gate(action, cl_1h, cl_4h, highs_4h=None, lows_4h=None):
     return True, 0, "non-directional — passed"
 
 
+def exhaustion_veto(action, cl, vols, rv):
+    """
+    REVERSAL / EXHAUSTION VETO (pure math, no AI).
+
+    Catches the two traps flagged on the charts:
+      • PULLBACK TRAP — entering a LONG when the up-move is exhausting (price
+        stalling, RSI rolling over, volume drying up) = buying the top (CLO case).
+      • REVERSAL TRAP — entering a SHORT right as a downtrend bottoms and turns
+        up (RSI turning up, capitulation volume done, bouncing) = shorting the
+        bottom (DOGE case).
+
+    Returns (block, confidence 0-1, reason). High confidence → block outright;
+    mid confidence → let the AI tiebreaker decide.
+    """
+    if len(cl) < 20:
+        return False, 0.0, "insufficient data"
+    signals = []; conf = 0.0
+    last3_up = sum(1 for i in range(-3, 0) if cl[i] > cl[i-1])
+    last3_dn = 3 - last3_up
+    rv_prev = rsi(cl[:-3]) if len(cl) > 17 else rv
+    rsi_falling = rv < rv_prev - 3
+    rsi_rising  = rv > rv_prev + 3
+    v_now  = sum(vols[-2:]) / 2 if len(vols) >= 2 else 0
+    v_base = sum(vols[-12:-3]) / 9 if len(vols) >= 12 and sum(vols[-12:-3]) > 0 else 0
+    v_climax = max(vols[-6:-2]) if len(vols) >= 6 else 0
+    vol_drying = v_base > 0 and v_now < v_base * 0.7
+    vol_climax_done = v_base > 0 and v_climax > v_base * 2.2 and v_now < v_climax * 0.6
+    if action == 'LONG':
+        if rv > 70:       signals.append("overbought"); conf += 0.35
+        if rsi_falling:   signals.append("RSI rolling over"); conf += 0.30
+        if last3_dn >= 2: signals.append("last candles red"); conf += 0.20
+        if vol_drying:    signals.append("volume drying up"); conf += 0.20
+        e9 = ema(cl, 9)
+        if e9 and (cl[-1] - e9) / e9 * 100 > 8:
+            signals.append("stretched above EMA"); conf += 0.25
+    else:
+        if rv < 30:           signals.append("oversold"); conf += 0.35
+        if rsi_rising:        signals.append("RSI turning up"); conf += 0.30
+        if last3_up >= 2:     signals.append("last candles green"); conf += 0.25
+        if vol_climax_done:   signals.append("capitulation done"); conf += 0.25
+        e9 = ema(cl, 9)
+        if e9 and (e9 - cl[-1]) / e9 * 100 > 8:
+            signals.append("stretched below EMA"); conf += 0.20
+    conf = min(1.0, conf)
+    return (conf >= 0.55), conf, (", ".join(signals) if signals else "clean")
+
+
 def s_momentum(sym,tk,cl,vols,bbd,rv,mhv,obv):
     ch=tk.get('change',0); pr=tk.get('price',0)
     # Was: ch<5 → only fired AFTER a coin already ran 5%+ (entering late, at the
@@ -302,6 +349,49 @@ class Regime:
         return True
 
 # ── Scanner ───────────────────────────────────────────────────────────────────
+# AI tiebreaker — ONLY called for mid-confidence exhaustion cases (0.35-0.55),
+# where the math is unsure. High-confidence traps are blocked without AI; clean
+# setups pass without AI. So Groq is used sparingly (cost + latency control), and
+# a circuit breaker disables it after repeated failures so it can never strangle
+# trading the way the old setup did.
+_AI_STATE = {'dead': False, 'fails': 0, 'calls': 0}
+
+def ai_tiebreak(symbol, action, reason, rv, change):
+    """Returns True = allow trade, False = block. Defaults to ALLOW on any error
+    (math veto already did the safety work; AI is only a bonus opinion)."""
+    if _AI_STATE['dead']:
+        return True
+    key = os.getenv('GROQ_API_KEY') or os.getenv('GROQ_KEY')
+    if not key:
+        return True
+    try:
+        import requests as _rq
+        prompt = (f"{action} {symbol}, RSI={rv:.0f}, 24h change={change:.1f}%. "
+                  f"Possible reversal/exhaustion signals: {reason}. "
+                  f"Is this a TRAP (entering at a top/bottom about to reverse)? "
+                  f"Answer ONLY 'TRAP' or 'OK'.")
+        r = _rq.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers={"Authorization": f"Bearer {key}"},
+            json={"model": "llama-3.3-70b-versatile",
+                  "messages": [{"role": "user", "content": prompt}],
+                  "max_tokens": 5, "temperature": 0},
+            timeout=6)
+        _AI_STATE['calls'] += 1
+        if r.status_code == 200:
+            ans = r.json()['choices'][0]['message']['content'].strip().upper()
+            _AI_STATE['fails'] = 0
+            return 'TRAP' not in ans      # TRAP → block, OK → allow
+        else:
+            _AI_STATE['fails'] += 1
+    except Exception:
+        _AI_STATE['fails'] += 1
+    if _AI_STATE['fails'] >= 5:
+        _AI_STATE['dead'] = True
+        log.warning("🧠 AI tiebreaker disabled (5 fails) — math veto only")
+    return True   # default allow on error
+
+
 # Global state shared with Flask
 STATE = {'timestamp': None, 'opportunities': [], 'regime': 'NEUTRAL',
          'fear_greed': 50, 'symbols_scanned': 0, 'strategy_counts': {},
@@ -381,6 +471,17 @@ class Scanner:
                                                  h.get('highs_4h'), h.get('lows_4h'))
                     if not _ok:
                         continue   # higher timeframe disagrees — skip
+                    # EXHAUSTION/REVERSAL VETO (math first)
+                    _blk, _vconf, _vwhy = exhaustion_veto(o['action'], cl, vols, rv)
+                    if _blk:
+                        # high-confidence trap — block outright, no AI needed
+                        continue
+                    if _vconf >= 0.35:
+                        # mid-confidence: math unsure → AI tiebreaker decides
+                        if not ai_tiebreak(sym, o['action'], _vwhy, rv,
+                                           tk.get('change', 0)):
+                            continue   # AI says TRAP → skip
+                        o['reason'] = f"{o.get('reason','')} | AI-OK({_vwhy})"
                     o['score'] = min(100, o.get('score', 50) + _bonus)
                     o['mtf'] = _why
                     o['reason'] = f"{o.get('reason','')} | MTF: {_why}"
