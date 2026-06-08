@@ -178,19 +178,29 @@ class Filter:
         self.dedup.clean()
         scored = []
 
+        log.info(f"📥 Filter received {len(opps)} opportunities from scanner "
+                 f"(regime={regime}, MIN_SCORE={MIN_SCORE})")
+
         for o in opps:
             sym    = o.get('symbol', '')
             action = o.get('action', '')
-            if not sym or not action: continue
-            if not self.dedup.ok(sym, action): continue
+            if not sym or not action:
+                log.info(f"   ⏭️  skip: missing sym/action {o}")
+                continue
+            if not self.dedup.ok(sym, action):
+                log.info(f"   ⏭️  {sym} {action} deduped (traded recently)")
+                continue
             try:
                 fs, bd = score_opp(o, data, self.mtf, regime)
+                log.info(f"   📊 {action} {sym}: scanner_score={o.get('score')} "
+                         f"→ filter_score={fs} {bd}")
                 r = dict(o)
                 r.update({'filter_score': fs, 'breakdown': bd,
                           'filter_ts': datetime.now().isoformat(), 'rr_ratio': 1.5})
                 scored.append(r)
             except Exception as e:
-                log.warning(f"Score {sym}: {e}")
+                log.warning(f"   ❌ Score {sym} ERROR: {e}")
+                import traceback; traceback.print_exc()
 
         scored.sort(key=lambda x: x['filter_score'], reverse=True)
         passed = [s for s in scored if s['filter_score'] >= MIN_SCORE][:MAX_SIGNALS]
