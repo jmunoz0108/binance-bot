@@ -214,7 +214,10 @@ def exhaustion_veto(action, cl, vols, rv):
     vol_drying = v_base > 0 and v_now < v_base * 0.7
     vol_climax_done = v_base > 0 and v_climax > v_base * 2.2 and v_now < v_climax * 0.6
     if action == 'LONG':
-        if rv > 70:       signals.append("overbought"); conf += 0.35
+        # Approaching a TOP = risky to go long (the "am I buying the top?" zone)
+        if rv > 75:       signals.append("very overbought"); conf += 0.45
+        elif rv > 70:     signals.append("overbought"); conf += 0.35
+        elif rv > 66:     signals.append("getting overbought"); conf += 0.18
         if rsi_falling:   signals.append("RSI rolling over"); conf += 0.30
         if last3_dn >= 2: signals.append("last candles red"); conf += 0.20
         if vol_drying:    signals.append("volume drying up"); conf += 0.20
@@ -222,7 +225,12 @@ def exhaustion_veto(action, cl, vols, rv):
         if e9 and (cl[-1] - e9) / e9 * 100 > 8:
             signals.append("stretched above EMA"); conf += 0.25
     else:
-        if rv < 30:           signals.append("oversold"); conf += 0.35
+        # Approaching a BOTTOM = risky to short (the STRAX "am I shorting the
+        # bottom?" zone the user flagged). Deep oversold now weighs more, and we
+        # start getting cautious BEFORE the bounce fully confirms.
+        if rv < 25:           signals.append("very oversold"); conf += 0.45
+        elif rv < 30:         signals.append("oversold"); conf += 0.35
+        elif rv < 35:         signals.append("getting oversold"); conf += 0.18
         if rsi_rising:        signals.append("RSI turning up"); conf += 0.30
         if last3_up >= 2:     signals.append("last candles green"); conf += 0.25
         if vol_climax_done:   signals.append("capitulation done"); conf += 0.25
@@ -304,6 +312,77 @@ def s_reversal(sym,tk,cl,vols,rv,obv):
             'score':min(sc,100),'confidence':min(sc/100,.92),'price':pr,
             'change':ch,'volume':tk.get('volume',0),'rsi':rv,'vol_ratio':v,
             'ob_imbalance':obv,'reason':f"Reversal: {', '.join(rr[:3])}"}
+
+def s_structure_break(sym, tk, cl, vols, rv, obv):
+    """
+    BREAK OF STRUCTURE detector — catches the START of a move (the best early
+    signal, per the user's instinct). Logic:
+
+      • Find recent swing highs/lows (the structure).
+      • BEARISH BOS: price breaks BELOW the most recent swing low → uptrend
+        structure is breaking → SHORT. Best when it had higher-lows before.
+      • BULLISH BOS: price breaks ABOVE the most recent swing high → downtrend
+        structure breaking → LONG.
+      • REQUIRE a volume surge on the break — a break without volume is a
+        fakeout that snaps back. Volume is what proves the break is real.
+
+    This fires EARLIER than momentum (which needs the move already underway),
+    because the structure break is the first sign the trend is flipping.
+    """
+    if len(cl) < 25:
+        return None
+    pr = tk.get('price', cl[-1])
+    v = vr(vols)
+    # Need real volume on the break — no volume = fakeout
+    if v < 1.8:
+        return None
+
+    # Find swing highs/lows over the lookback (excluding the very last few bars,
+    # which are the "break" itself). A swing low = lower than neighbors.
+    look = cl[-25:-2]
+    if len(look) < 10:
+        return None
+    swing_low  = min(look[-12:])
+    swing_high = max(look[-12:])
+    # earlier structure to confirm a real trend was in place
+    earlier_low  = min(look[:10])
+    earlier_high = max(look[:10])
+
+    sc = 0; rr = []
+    # BEARISH BOS: was making higher lows, now breaks below recent swing low
+    if pr < swing_low * 0.998:
+        had_uptrend = swing_low > earlier_low   # higher lows before the break
+        sc += 30; rr.append("broke swing low (BOS down)")
+        if had_uptrend: sc += 15; rr.append("flipped from higher-lows")
+        if v >= 3: sc += 25; rr.append(f"vol {v:.1f}x confirms")
+        elif v >= 2: sc += 15; rr.append(f"vol {v:.1f}x")
+        if obv < -0.10: sc += 12; rr.append("sell pressure")
+        if 40 <= rv <= 60: sc += 10; rr.append(f"RSI {rv:.0f} room to fall")
+        elif rv < 30: sc -= 15   # already oversold = late
+        if sc < 60: return None
+        return {'symbol': sym, 'action': 'SHORT', 'strategy': 'Structure Break',
+                'score': min(sc, 100), 'confidence': min(sc/100, .95), 'price': pr,
+                'change': tk.get('change', 0), 'volume': tk.get('volume', 0),
+                'rsi': rv, 'vol_ratio': v, 'ob_imbalance': obv,
+                'reason': f"BOS: {', '.join(rr[:3])}"}
+    # BULLISH BOS: breaks above recent swing high with volume
+    if pr > swing_high * 1.002:
+        had_downtrend = swing_high < earlier_high
+        sc += 30; rr.append("broke swing high (BOS up)")
+        if had_downtrend: sc += 15; rr.append("flipped from lower-highs")
+        if v >= 3: sc += 25; rr.append(f"vol {v:.1f}x confirms")
+        elif v >= 2: sc += 15; rr.append(f"vol {v:.1f}x")
+        if obv > 0.10: sc += 12; rr.append("buy pressure")
+        if 45 <= rv <= 62: sc += 10; rr.append(f"RSI {rv:.0f} room to rise")
+        elif rv > 70: sc -= 15   # already overbought = late
+        if sc < 60: return None
+        return {'symbol': sym, 'action': 'LONG', 'strategy': 'Structure Break',
+                'score': min(sc, 100), 'confidence': min(sc/100, .95), 'price': pr,
+                'change': tk.get('change', 0), 'volume': tk.get('volume', 0),
+                'rsi': rv, 'vol_ratio': v, 'ob_imbalance': obv,
+                'reason': f"BOS: {', '.join(rr[:3])}"}
+    return None
+
 
 def s_funding(sym,rate,tk):
     if rate<0.0003: return None
@@ -476,7 +555,8 @@ class Scanner:
             ta[sym]={'rsi':rv,'macd_hist':mhv,'bb':bbd,'ob_imbalance':obv,
                      'vol_ratio':vv,'price':tk.get('price',0),'change':tk.get('change',0),
                      'volume':tk.get('volume',0)}
-            for fn,args in [(s_momentum,(sym,tk,cl,vols,bbd,rv,mhv,obv)),
+            for fn,args in [(s_structure_break,(sym,tk,cl,vols,rv,obv)),
+                            (s_momentum,(sym,tk,cl,vols,bbd,rv,mhv,obv)),
                             (s_squeeze,(sym,tk,cl,bbd,rv,obv)),
                             (s_reversal,(sym,tk,cl,vols,rv,obv))]:
                 try:
@@ -501,6 +581,17 @@ class Scanner:
                             continue   # AI says TRAP → skip
                         o['reason'] = f"{o.get('reason','')} | AI-OK({_vwhy})"
                     o['score'] = min(100, o.get('score', 50) + _bonus)
+                    # ROOM-TO-RUN preference: best entries are mid-trend, not at
+                    # exhaustion extremes (catches the move with room to keep
+                    # going, vs entering near a bottom/top like the STRAX case).
+                    # SHORT sweet spot RSI ~40-55 (falling, room to fall more);
+                    # LONG sweet spot RSI ~45-60 (rising, room to rise more).
+                    if o['action'] == 'SHORT':
+                        if 40 <= rv <= 55: o['score'] = min(100, o['score'] + 8)
+                        elif rv < 32:      o['score'] = max(0, o['score'] - 12)  # near bottom
+                    else:
+                        if 45 <= rv <= 60: o['score'] = min(100, o['score'] + 8)
+                        elif rv > 68:      o['score'] = max(0, o['score'] - 12)  # near top
                     o['mtf'] = _why
                     o['reason'] = f"{o.get('reason','')} | MTF: {_why}"
                     opps.append(o)
@@ -542,7 +633,8 @@ class Scanner:
                         rvb=rsi(cl); mhvb=mh(cl); bbdb=bb(cl)
                         tkb={'price':px,'change':ch,'volume':vol}
                         # run the SAME 3 strategies as Binance
-                        for fn,args in [(s_momentum,(s,tkb,cl,vols,bbdb,rvb,mhvb,0.)),
+                        for fn,args in [(s_structure_break,(s,tkb,cl,vols,rvb,0.)),
+                                        (s_momentum,(s,tkb,cl,vols,bbdb,rvb,mhvb,0.)),
                                         (s_squeeze,(s,tkb,cl,bbdb,rvb,0.)),
                                         (s_reversal,(s,tkb,cl,vols,rvb,0.))]:
                             try:
@@ -557,6 +649,12 @@ class Scanner:
                                 if _blk: continue
                                 if _vc>=0.35 and not ai_tiebreak(s,o['action'],_vw,rvb,ch): continue
                                 o['score']=min(100,o.get('score',60)+_bonus)
+                                if o['action']=='SHORT':
+                                    if 40<=rvb<=55: o['score']=min(100,o['score']+8)
+                                    elif rvb<32:    o['score']=max(0,o['score']-12)
+                                else:
+                                    if 45<=rvb<=60: o['score']=min(100,o['score']+8)
+                                    elif rvb>68:    o['score']=max(0,o['score']-12)
                                 o['mtf']=_why
                                 o['reason']=f"{o.get('reason','')} | MTF: {_why}"
                                 opps.append(o); by_count+=1
