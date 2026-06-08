@@ -580,6 +580,17 @@ class Scanner:
                                            tk.get('change', 0)):
                             continue   # AI says TRAP → skip
                         o['reason'] = f"{o.get('reason','')} | AI-OK({_vwhy})"
+                    # ALREADY-MOVED REJECTION (fixes EPIC +7% top-buy & LAB -16%
+                    # bottom-short). A coin that has already moved hard in the
+                    # trade's direction has done most of the move — entering now
+                    # is chasing/late. Structure Break is exempt (it's MEANT to
+                    # catch fresh breaks, not 24h-old moves).
+                    _ch = tk.get('change', 0)
+                    if 'Structure Break' not in o.get('strategy', ''):
+                        if o['action'] == 'LONG' and _ch > 6:
+                            continue   # already pumped — don't chase the top
+                        if o['action'] == 'SHORT' and _ch < -10:
+                            continue   # already crashed — don't short the hole
                     o['score'] = min(100, o.get('score', 50) + _bonus)
                     # ROOM-TO-RUN preference: best entries are mid-trend, not at
                     # exhaustion extremes (catches the move with room to keep
@@ -648,6 +659,10 @@ class Scanner:
                                 _blk,_vc,_vw=exhaustion_veto(o['action'],cl,vols,rvb)
                                 if _blk: continue
                                 if _vc>=0.35 and not ai_tiebreak(s,o['action'],_vw,rvb,ch): continue
+                                # already-moved rejection (same as Binance side)
+                                if 'Structure Break' not in o.get('strategy',''):
+                                    if o['action']=='LONG' and ch>6: continue
+                                    if o['action']=='SHORT' and ch<-10: continue
                                 o['score']=min(100,o.get('score',60)+_bonus)
                                 if o['action']=='SHORT':
                                     if 40<=rvb<=55: o['score']=min(100,o['score']+8)
