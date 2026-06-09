@@ -10,7 +10,7 @@ from collections import defaultdict
 from binance.client import Client
 from flask import Flask, jsonify
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s [FILTER] %(message)s') 
+logging.basicConfig(level=logging.INFO, format='%(asctime)s [FILTER] %(message)s')
 log = logging.getLogger('filter')
 
 PORT            = int(os.getenv('PORT', 8080))
