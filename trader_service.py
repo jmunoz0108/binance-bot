@@ -39,7 +39,7 @@ log.info("=" * 55)
 
 
 class TrailingStop:
-    def __init__(self, sl_pct=0.015):
+    def __init__(self, sl_pct=0.035):
         self.sl_pct = sl_pct
         self.state  = {}
 
@@ -59,33 +59,36 @@ class TrailingStop:
         if pnl > s['peak_pnl']:
             s['peak_pnl'] = pnl
         peak = s['peak_pnl']
-        # LET WINNERS RUN. The old trail tightened almost immediately (1.5% buf
-        # from the start), cutting trends short. New logic: don't trail at all
-        # until the trade is solidly in profit, then trail LOOSELY so it rides
-        # the move, only tightening once the gain is large enough to protect.
-        #   < +3%  : no trail yet — just the hard stop. Give it room.
-        #   +3-8%  : loose trail (give back ~2.5% to stay in the trend)
-        #   +8-15% : medium trail (give back ~2%)
-        #   +15-25%: tighter (1.2%)
-        #   > +25% : lock it in (0.7%)
-        if   peak >= 0.25: buf = 0.007
-        elif peak >= 0.15: buf = 0.012
-        elif peak >= 0.08: buf = 0.020
-        elif peak >= 0.03: buf = 0.025
-        else:              buf = None   # below +3% → no trail, only hard stop
-        if buf is not None and peak > 0:
-            new_sl = peak - buf
+        # PROTECT PROFIT EARLY, then let winners run. The old version gave NO
+        # protection below +3%, so a trade could run to +3% and round-trip all
+        # the way back to the hard stop (the user's "went up 3% then went down"
+        # complaint). Now we move the stop up in stages so profit is locked:
+        #   +1.2% peak → stop to breakeven (can't lose anymore)
+        #   +2%   peak → stop to +0.6% (lock a small win)
+        #   +3-8% peak → trail 1.5% behind
+        #   +8-15%      → trail 2% behind (let it breathe on big moves)
+        #   +15-25%     → trail 1.2%
+        #   >+25%       → trail 0.7% (lock the big win)
+        if   peak >= 0.25: new_sl = peak - 0.007
+        elif peak >= 0.15: new_sl = peak - 0.012
+        elif peak >= 0.08: new_sl = peak - 0.020
+        elif peak >= 0.03: new_sl = peak - 0.015
+        elif peak >= 0.02: new_sl = 0.006      # lock +0.6%
+        elif peak >= 0.012: new_sl = 0.0       # lock breakeven
+        else:              new_sl = None       # too early — only the hard stop
+        if new_sl is not None:
             if new_sl > s['dynamic_sl']:
                 s['dynamic_sl'] = new_sl
                 if not s['be_active'] and new_sl >= 0:
                     s['be_active'] = True
-                    log.info(f"  🔒 {symbol} BREAKEVEN SL→{new_sl*100:+.2f}%")
-        if buf is not None and pnl <= s['dynamic_sl'] and s['dynamic_sl'] > -self.sl_pct:
-            reason = (f"TRAIL HIT pnl={pnl*100:.2f}% "
-                      f"sl={s['dynamic_sl']*100:.2f}% peak={s['peak_pnl']*100:.2f}%")
-            del self.state[symbol]
-            return True, reason
-        # Hard stop — the wider SL_PCT (3.5%) gives the trade room to work.
+                    log.info(f"  🔒 {symbol} profit locked SL→{new_sl*100:+.2f}%")
+            # exit if price falls back to the locked stop
+            if pnl <= s['dynamic_sl']:
+                reason = (f"TRAIL HIT pnl={pnl*100:.2f}% "
+                          f"sl={s['dynamic_sl']*100:.2f}% peak={peak*100:.2f}%")
+                del self.state[symbol]
+                return True, reason
+        # Hard stop — wider SL_PCT gives the trade room before profit-lock kicks in.
         if pnl <= -self.sl_pct:
             reason = f"HARD STOP pnl={pnl*100:.2f}%"
             del self.state[symbol]
