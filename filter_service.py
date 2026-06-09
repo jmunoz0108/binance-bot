@@ -74,15 +74,25 @@ class MTF:
         except: return 'NEUTRAL'
 
 class Dedup:
+    # Cooldown after a coin is traded, to avoid double-entering the same setup
+    # within minutes. Was 3600s (1 HOUR) — far too long: the scanner keeps
+    # surfacing the same best picks (PEPE/FET/EIGEN), so a 1hr block starved the
+    # bot ("0 passed" every cycle despite good picks). 15 min is enough to avoid
+    # rapid re-entry without blocking a coin that's still a valid setup later.
+    COOLDOWN_SEC = int(os.getenv('DEDUP_COOLDOWN_SEC', '900'))   # 15 min
     def __init__(self): self._s = {}
     def ok(self, sym, action):
         if sym not in self._s: return True
-        if (datetime.now() - self._s[sym]['ts']).seconds > 3600:
+        # only block the SAME direction; allow if direction flipped
+        prev = self._s[sym]
+        if (datetime.now() - prev['ts']).seconds > self.COOLDOWN_SEC:
             del self._s[sym]; return True
+        if prev.get('action') != action:
+            return True   # direction changed (e.g. was SHORT, now LONG) → allow
         return False
     def mark(self, sym, action): self._s[sym] = {'action': action, 'ts': datetime.now()}
     def clean(self):
-        cut = datetime.now() - timedelta(hours=2)
+        cut = datetime.now() - timedelta(seconds=self.COOLDOWN_SEC * 2)
         self._s = {k: v for k, v in self._s.items() if v['ts'] > cut}
 
 def score_opp(opp, scanner_data, mtf, regime):
